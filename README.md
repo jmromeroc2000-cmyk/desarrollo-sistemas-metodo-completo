@@ -1,8 +1,13 @@
 # Desarrollo de Sistemas — Método Completo
 
+[![Release](https://img.shields.io/badge/release-v1.0.0-blue)](https://github.com/jmromeroc2000-cmyk/desarrollo-sistemas-metodo-completo/releases/tag/v1.0.0)
+
 Método de creación de sistemas en **5 fases** dirigido por **metadata**.
 La metadata se diseña antes de programar y es el contrato que backend y
 frontend leen — nunca duplican.
+
+> **Última versión publicada:** [v1.0.0 — Método Completo V1](https://github.com/jmromeroc2000-cmyk/desarrollo-sistemas-metodo-completo/releases/tag/v1.0.0)
+> · Mayo 2026 · Listo para reuso
 
 ## ¿Qué hay aquí?
 
@@ -67,4 +72,5 @@ Método extraído del proyecto SistemaINV (sistema de inventarios) tras
 desarrollarlo a través de 11 migraciones que establecieron progresivamente
 la convención de metadata vigente (v1.1).
 
-Tag inicial: `v1.0.0` — método V1 listo para reuso.
+**Release inicial:** [v1.0.0 — Método Completo V1](https://github.com/jmromeroc2000-cmyk/desarrollo-sistemas-metodo-completo/releases/tag/v1.0.0)
+(método V1 listo para reuso · mayo 2026).
