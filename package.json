@@ -1,6 +1,6 @@
 {
   "name": "metodo-desarrollo-sistemas",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "Método de desarrollo de sistemas dirigido por metadata, con convivencia multi-agente y portabilidad a 6 DBMS (PG/MySQL/SQL Server/Oracle/DB2/Spanner).",
   "private": true,
   "type": "module",

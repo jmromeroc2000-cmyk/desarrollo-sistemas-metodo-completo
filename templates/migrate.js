@@ -28,6 +28,7 @@
 //   Tiene API client distinta (transactions explícitas, no SQL strings),
 //   se delega a un código specializado al detectar adapter.dbms === 'spanner'.
 
+import 'dotenv/config';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';

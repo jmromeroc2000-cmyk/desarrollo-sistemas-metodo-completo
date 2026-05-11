@@ -21,6 +21,47 @@ vía `release-please` (`.github/workflows/release-please.yml`).
 
 Scopes convencionales: `be`, `fe`, `infra`, `meta`, `deps`, `method`.
 
+## [3.0.1] — 2026-05-11 — Hotfix: migrate.js carga `.env`
+
+### Fixed
+
+- **`templates/migrate.js` no importaba `dotenv/config`**. Sin esto, las
+  env vars de `.env` no se cargaban — el runner usaba defaults o env vars
+  del shell padre, lo cual producía el síntoma "runner reporta 'aplicada'
+  pero la BD destino está vacía" (estaba aplicando contra otra BD).
+
+  **Detectado durante IAM1** (primer sistema productivo construido sobre
+  v3.0.0). El smoke test contra PostgreSQL en v3.0.0 no lo expuso porque
+  usaba env vars del shell directamente, no `.env`.
+
+  Fix: agregar `import 'dotenv/config';` como primer import del runner.
+
+### Impacto en proyectos v3.0.0 existentes
+
+Si tu proyecto creado con v3.0.0 funciona en local, probablemente las env
+vars de tu shell coinciden con tu `.env` (caso típico en dev). Si no, ves
+el síntoma de arriba.
+
+Fix manual a tu proyecto:
+
+```bash
+sed -i.bak "s|^import { readdirSync|import 'dotenv/config';\\nimport { readdirSync|" \
+  Dev/scripts/migrate.js
+```
+
+O reemplazar desde la plantilla v3.0.1:
+
+```bash
+curl -o Dev/scripts/migrate.js \
+  https://raw.githubusercontent.com/jmromeroc2000-cmyk/desarrollo-sistemas-metodo-completo/v3.0.1/templates/migrate.js
+```
+
+### Validación
+
+PostgreSQL smoke end-to-end en IAM1: migrate up → 4 tablas creadas + 5
+roles seedeados → migrate down 0 → todo dropped → migrate up → re-aplica
+limpio. ✅
+
 ## [3.0.0] — 2026-05-13 — Portabilidad multi-DBMS
 
 Salto MAJOR sobre v2.0.0. **Requisito firme del usuario:** el método y todos
