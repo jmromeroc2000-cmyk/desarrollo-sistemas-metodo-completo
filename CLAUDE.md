@@ -2347,6 +2347,59 @@ Ejemplos:
 - `gen:catalog` (Plop) solo lista tablas con `tabla_uso='crud'` y
   `generar_ui_crud=1`.
 
+### 13.3e Telemetría client-side y feature flags (v2.0.0)
+
+#### Telemetría client-side (mínimo aceptable)
+
+```yaml
+captura_errores:
+  ventana_target:  errores no-manejados + unhandled promise rejection
+  destino:         Sentry / similar (componente en componentes_sistema)
+  redacción:       email, tokens, PII redactados antes de enviar
+  configurable:    via .env SENTRY_DSN (vacío = telemetría off)
+
+metricas_UX:
+  herramienta:     web-vitals npm package
+  metricas:        TTFB, FCP, LCP, CLS, INP (Core Web Vitals)
+  destino:         endpoint backend /v1/telemetry/web-vitals
+                   tabla: telemetria_web_vitals (nivel 9)
+  sample_rate:     10% en PERFORMANCE, 100% en DEBUG
+
+session_replay:
+  default:         off
+  activar:         decisión per-proyecto (riesgo de leak de PII)
+  herramienta:     rrweb / similar; SOLO con consentimiento del usuario
+                   variable: TELEMETRY_REPLAY_ENABLED
+```
+
+#### Feature flags client-side
+
+Distinto de semáforos (nivel 2 — gobiernan operaciones de negocio).
+Feature flags son **UI/experience-level**:
+
+```yaml
+casos_de_uso:
+  - Toggle dark mode default
+  - Hide/show experimental feature
+  - A/B copy de un botón
+  - Rollout gradual de pantalla nueva
+
+mecanismo:
+  opción_A (interno):  tabla feature_flags en BD (nivel 2 extendido)
+                       endpoint GET /v1/feature-flags
+                       frontend cachea con TanStack Query (stale 5min)
+
+  opción_B (externo):  LaunchDarkly / GrowthBook / Statsig
+                       requiere componente en componentes_sistema
+
+decisión:           /stack-pick pregunta cuál (default: opción A)
+
+reglas:
+  - Flags por usuario o por rol (no globales)
+  - Default deshabilitado (fail safe)
+  - Limpiar flags inactivos cada release (no acumular debt)
+```
+
 ### 13.4 Roles del sistema (fijos)
 
 Cada proyecto debe sembrar EXACTAMENTE estos 5 roles con los UUIDs reservados:
