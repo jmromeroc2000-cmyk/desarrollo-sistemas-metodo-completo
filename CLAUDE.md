@@ -725,12 +725,159 @@ producción rota.
 ✗ Mergear sin leer último mensaje del otro agente en docs/messages/open/
 ```
 
+#### F) Contratos canónicos del API (v2.0.0)
+
+> Codified después de SistemaINV — confundimos shapes 3-4 veces. Estas
+> reglas son **contrato firme**, no convención negociable.
+
+##### F.1 Matriz canónica de códigos HTTP
+
+| Código | Cuándo se usa | Body |
+|--------|---------------|------|
+| **200** | OK con recurso o lista | `{ data: ... }` |
+| **201** | Created — devuelve el recurso creado | `{ data: <recurso> }` |
+| **204** | No content — DELETE o ack | (vacío) |
+| **400** | Body mal formado (JSON inválido, falta campo obligatorio) | Problem+JSON |
+| **401** | No autenticado / token inválido / expirado | Problem+JSON con `type: token-expired\|token-invalid\|auth-required` |
+| **403** | Autenticado pero rol no autoriza el recurso | Problem+JSON con `type: forbidden\|role-insufficient` |
+| **404** | Recurso no existe | Problem+JSON con `type: not-found` |
+| **409** | Conflicto de estado (state machine violation, duplicate key, optimistic-concurrency mismatch, protected-resource) | Problem+JSON con `type: conflict-*` específico |
+| **422** | Payload sintácticamente válido pero falla validación de negocio (rango, regex, enum) | Problem+JSON con `type: validation-failed`, body incluye `errors: [...]` |
+| **423** | Locked por semáforo de gating | Problem+JSON con `type: locked-by-semaphore`, `semaphore: <codigo>` |
+| **503** | maintenanceGuard activo | Problem+JSON + header `Retry-After: <seconds>` |
+
+PROHIBIDO:
+- 200 con `error` en el body. Si hay error, status 4xx/5xx.
+- 500 para condiciones esperadas (ej: trigger BD que lanza excepción
+  conocida → capturar y mapear a 409).
+- 401 vs 403 confundidos. 401 = no sé quién eres. 403 = sé quién eres pero no puedes.
+
+##### F.2 Problem+JSON (RFC 9457)
+
+Todo error 4xx/5xx devuelve este shape:
+
+```json
+{
+  "type":     "https://<dominio>/errors/<categoría>",
+  "title":    "<≤120 chars summary, fijo por type>",
+  "status":   <int igual al HTTP status>,
+  "detail":   "<≤500 chars descripción accionable para el usuario>",
+  "instance": "/v1/<path-de-la-request>",
+  "correlation_id": "<uuid>"
+}
+```
+
+REGLAS:
+- `title` Y `detail` deben estar poblados, no vacíos. Test del endpoint
+  debe assert ambos.
+- `type` URI es **contrato estable**. Renombrar requiere bump MAJOR de API.
+- Cambios solo aditivos (campos nuevos OK, eliminar campo es breaking).
+- `extra` extensions (ej: `semaphore`, `errors: [...]`) son aditivas;
+  documentar en §5.1.2.F donde se usan.
+
+##### F.3 Envelope de respuestas
+
+```json
+// Listas paginadas:
+{
+  "data":        [...],
+  "next_cursor": "opaco-base64-o-null"
+}
+
+// Listas no paginadas:
+{ "data": [...] }
+
+// Recurso único:
+{ "data": <recurso> }
+
+// 204:
+(body vacío)
+```
+
+NUNCA:
+- `{ items: [...] }` o `{ rows: [...] }` o variantes — siempre `data`.
+- `{ data, pagination: { next_cursor } }` anidado — plano.
+- `data` ausente cuando hay payload de éxito.
+
+##### F.4 Serialización de tipos
+
+| Tipo BD | Shape JSON | Notas |
+|---------|------------|-------|
+| `TIMESTAMP` / `TIMESTAMPTZ` | ISO 8601 string `"2026-05-11T10:00:00.000Z"` | `JSON.stringify(date)` lo hace automático. Tests reciben string, no Date. |
+| `DATE` | ISO date string `"2026-05-11"` | Sin hora. |
+| `BOOLEANO_01` (smallint 0/1) | `0 \| 1` (number) | Decisión histórica. NO se serializa como `true/false`. |
+| `INTEGER` / `BIGINT` | number | Para BIGINT > 2^53, devolver string + flag explícito. |
+| `DECIMAL` / `NUMERIC` | number | Cuidado con precisión; documentar si requiere `string`. |
+| `UUID` / `CHAR(36)` | string | siempre. |
+| `JSON` / `JSONB` | objeto/array | parseado, no string. |
+| `NULL` | `null` | NO omitir el campo. Si la columna existe en el SELECT, el campo aparece en JSON. |
+
+REGLAS:
+- Test que compara timestamps lo hace como **strings**, no como `Date`.
+  Evita el bug pg-μs vs JS-ms (ver `memory/pg-timestamp-precision.md`).
+- Booleanos siempre `0|1` numérico — no se mezcla con `true/false` en
+  ningún endpoint del mismo proyecto.
+- Campos `null` se incluyen explícitos en respuesta. Frontend distingue
+  "campo presente pero null" de "campo ausente".
+
+##### F.5 Idempotencia uniforme
+
+Operaciones que el frontend puede reintentar (doble-click, red intermitente):
+
+```js
+// Cancelar OC que ya está CANCELADA:
+PATCH /v1/ordenes-compra/:id/cancelar
+// → 200 con el recurso actual
+{
+  "data": <recurso>,
+  "sin_cambio": true   // ← bandera opcional indicando que no hubo cambio real
+}
+```
+
+REGLAS:
+- 200 si el estado actual ya es el deseado (no 409).
+- Body incluye `sin_cambio: true` + el `data` completo.
+- 409 SE RESERVA para "estado actual no permite transición a deseado"
+  (ej: cancelar una OC COMPLETADA).
+- Para `PATCH` con body parcial igual al actual: 200 + `sin_cambio: true`,
+  no escribir historia/audit.
+
+##### F.6 Versionado del API
+
+Todo endpoint vive en `/v<N>/...` desde día 1. La política:
+
+```
+ADITIVOS (NO requieren bump):
+  - Campos nuevos en response
+  - Endpoints nuevos
+  - Query params opcionales nuevos
+  - Headers de response nuevos
+  - Valores nuevos en enum de response (los clientes deben tolerar enums abiertos)
+
+BREAKING (requieren bump /v2):
+  - Cambio de tipo de campo (string→number)
+  - Eliminación de campo
+  - Rename de campo (eliminar + agregar)
+  - Cambio de status code para misma condición
+  - Removal de endpoint
+  - Cambio de shape de paginación o de error
+  - Cambio de identidad del `type:` URI de Problem+JSON
+
+PROCEDIMIENTO de bump:
+  1. /v2 vive en paralelo con /v1 por mínimo 90 días.
+  2. /v1 sirve respuestas con header `Deprecation: true` + `Sunset: <RFC9745 date>`.
+  3. Sunset programado en CHANGELOG con fecha exacta.
+  4. Backend agent NO puede hacer breaking sin RFC previo aprobado en docs/messages/.
+```
+
 #### Tooling enforce de esta sección
 
 - `.husky/pre-commit` — corre `scripts/orphan-migration-check.sh`
-- `.github/workflows/ci.yml` job `migrations-clean-apply` — fresh DB + migrate
-- Sub-agente `be-reviewer` (en `.claude/agents/`) — revisión semántica del diff
-- Skill `/be` (en `.claude/skills/be/`) — modo disciplinado obligatorio
+- `.github/workflows/ci.yml` job `migrations-clean-apply` — fresh DB + migrate (up)
+- `.github/workflows/ci.yml` job `migrations-down-syntax` — cada .up tiene .down y parsea
+- `.github/workflows/ci.yml` job `metadata-snapshot-sync` — back/front en sync
+- Sub-agente `be-reviewer` — revisión semántica del diff
+- Skill `/be` — modo disciplinado obligatorio
 
 ---
 
