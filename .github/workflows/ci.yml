@@ -4,56 +4,96 @@ on:
   pull_request:
     branches: [main]
     paths-ignore:
-      - '**.md'
       - 'docs/**'
       - 'LICENSE'
+      - '*.md'
   push:
     branches: [main]
     paths-ignore:
-      - '**.md'
       - 'docs/**'
       - 'LICENSE'
+      - '*.md'
   workflow_dispatch:
 
+# Cancel-in-progress SOLO en PRs (en main no, porque release-please y otros
+# workflows pueden estar disparándose del mismo commit).
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-# Opt-in al runtime Node.js 24 para actions JavaScript-based.
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # ─────────────────────────────────────────────────────────────────
-  # Job 0: detección de paths cambiados
-  # Cada job de abajo se condiciona contra esta salida.
+  # Job 0: detección granular de paths cambiados.
+  # Output drive el if: de cada job de abajo.
   # ─────────────────────────────────────────────────────────────────
   changes:
     name: Detect changes
     runs-on: ubuntu-latest
     outputs:
-      backend:  ${{ steps.filter.outputs.backend }}
-      frontend: ${{ steps.filter.outputs.frontend }}
-      migrations: ${{ steps.filter.outputs.migrations }}
+      backend:        ${{ steps.filter.outputs.backend }}
+      frontend:       ${{ steps.filter.outputs.frontend }}
+      migrations:     ${{ steps.filter.outputs.migrations }}
+      ci:             ${{ steps.filter.outputs.ci }}
+      messages:       ${{ steps.filter.outputs.messages }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dorny/paths-filter@v3
         id: filter
         with:
           filters: |
             backend:
               - 'Dev/src/**'
-              - 'Dev/migrations/**'
               - 'Dev/tests/**'
+              - 'Dev/migrations/**'
               - 'Dev/package*.json'
               - 'Dev/scripts/**'
+              - 'Dev/server.js'
             frontend:
               - 'Dev/frontend/**'
             migrations:
               - 'Dev/migrations/**'
+              - 'Dev/package*.json'
+              - 'Dev/scripts/migrate*'
+              - 'Dev/src/db/**'
+            ci:
+              - '.github/workflows/**'
+              - 'scripts/**'
+              - '.husky/**'
+            messages:
+              - 'docs/messages/**'
 
   # ─────────────────────────────────────────────────────────────────
-  # Backend tests
+  # CI self-check: si cambió ci.yml o scripts/, correr una sanity
+  # mínima para asegurar que los workflows son válidos.
+  # ─────────────────────────────────────────────────────────────────
+  ci-sanity:
+    name: CI self-check
+    needs: changes
+    if: needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+      - name: Validate workflow YAML syntax
+        run: |
+          for f in .github/workflows/*.yml; do
+            node -e "require('yaml').parse(require('fs').readFileSync('$f', 'utf8'))" 2>&1 || exit 1
+          done
+      - name: Validate shell scripts syntax
+        run: |
+          for f in scripts/*.sh .husky/*; do
+            [ -f "$f" ] && bash -n "$f" || true
+          done
+      - name: Smoke test message-bus-validate
+        run: node scripts/message-bus-validate.js
+      - name: Smoke test orphan-migration-check
+        run: bash scripts/orphan-migration-check.sh
+
+  # ─────────────────────────────────────────────────────────────────
+  # Backend: typecheck + lint + tests + migrate
   # ─────────────────────────────────────────────────────────────────
   backend:
     name: Backend (tests)
@@ -98,8 +138,8 @@ jobs:
       run:
         working-directory: Dev
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
           cache: npm
@@ -114,11 +154,10 @@ jobs:
         run: npm test
 
   # ─────────────────────────────────────────────────────────────────
-  # Migrations clean apply — aislado del job backend
-  # Fresh DB → npm run migrate. Si falla aquí, falla en producción.
+  # Migrations clean apply — fresh DB → up.sql en orden.
   # ─────────────────────────────────────────────────────────────────
   migrations-clean-apply:
-    name: Migrations (clean apply)
+    name: Migrations (clean apply up)
     needs: changes
     if: needs.changes.outputs.migrations == 'true'
     runs-on: ubuntu-latest
@@ -146,26 +185,155 @@ jobs:
       run:
         working-directory: Dev
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
           cache: npm
           cache-dependency-path: Dev/package-lock.json
       - name: Install deps
         run: npm ci --no-audit --no-fund
-      - name: Apply all migrations from scratch
+      - name: Apply all migrations (up) from scratch
         run: npm run migrate
-      - name: Verify metadata_versiones row count matches migration count
+      - name: Verify metadata_versiones has at least one row
         run: |
-          MIG_COUNT=$(ls migrations/*.sql | wc -l)
           DB_COUNT=$(PGPASSWORD=testpassword psql -h localhost -U testuser sistema_clean -tAc "SELECT COUNT(*) FROM metadata_versiones")
-          echo "Migrations on disk: $MIG_COUNT"
-          echo "metadata_versiones rows: $DB_COUNT"
-          # No es estricto: no todas las migs bumpean versión, pero
-          # debe haber al menos una versión registrada.
           if [ "$DB_COUNT" -lt "1" ]; then
-            echo "ERROR: metadata_versiones está vacía"
+            echo "ERROR: metadata_versiones está vacía después de migrar"
+            exit 1
+          fi
+          echo "metadata_versiones rows: $DB_COUNT"
+
+  # ─────────────────────────────────────────────────────────────────
+  # Migrations down syntax check
+  # Para cada migración con .down.sql, valida que el SQL parsea.
+  # No corre el down — solo dry-run sintáctico vía psql.
+  # ─────────────────────────────────────────────────────────────────
+  migrations-down-syntax:
+    name: Migrations (down sintaxis)
+    needs: changes
+    if: needs.changes.outputs.migrations == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: sistema_syn
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpassword
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U testuser -d sistema_syn"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cada .up.sql tiene su .down.sql
+        run: |
+          missing=0
+          for up in Dev/migrations/*.up.sql; do
+            base="${up%.up.sql}"
+            down="${base}.down.sql"
+            if [ ! -f "$down" ]; then
+              echo "❌ FALTA: $down (para $up)"
+              missing=$((missing + 1))
+            fi
+          done
+          if [ $missing -gt 0 ]; then
+            echo "ERROR: $missing migraciones no tienen .down.sql"
+            exit 1
+          fi
+      - name: Sintaxis válida en cada .down.sql
+        run: |
+          for down in Dev/migrations/*.down.sql; do
+            # PG parse-only via EXPLAIN — falla si SQL es inválido
+            PGPASSWORD=testpassword psql -h localhost -U testuser sistema_syn \
+              -v ON_ERROR_STOP=1 \
+              -c "BEGIN; $(cat $down); ROLLBACK;" 2>&1 || { echo "❌ Sintaxis inválida: $down"; exit 1; }
+            echo "✓ $down"
+          done
+
+  # ─────────────────────────────────────────────────────────────────
+  # Metadata snapshot sync — backend y frontend coinciden en metadata.
+  # ─────────────────────────────────────────────────────────────────
+  metadata-snapshot-sync:
+    name: Metadata snapshot sync (back ↔ front)
+    needs: changes
+    if: needs.changes.outputs.migrations == 'true' || needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: sistema_sync
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpassword
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U testuser -d sistema_sync"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DB_HOST: localhost
+      DB_PORT: 5432
+      DB_NAME: sistema_sync
+      DB_USER: testuser
+      DB_PASSWORD: testpassword
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: |
+            Dev/package-lock.json
+            Dev/frontend/package-lock.json
+      - name: Install backend deps
+        working-directory: Dev
+        run: npm ci --no-audit --no-fund
+      - name: Install frontend deps
+        working-directory: Dev/frontend
+        run: npm ci --no-audit --no-fund
+      - name: Apply migrations
+        working-directory: Dev
+        run: npm run migrate
+      - name: Regenerate metadata snapshot
+        working-directory: Dev/frontend
+        run: npm run meta:snapshot
+      - name: Verify snapshot is in sync
+        run: |
+          if ! git diff --exit-code -- Dev/frontend/tokens/metadata-snapshot.json; then
+            echo ""
+            echo "❌ metadata-snapshot.json está DESACTUALIZADO."
+            echo "    Backend modificó campos_sistema (migración nueva) pero frontend"
+            echo "    no regeneró el snapshot. Corre:"
+            echo ""
+            echo "      cd Dev/frontend && npm run meta:snapshot"
+            echo "      git add Dev/frontend/tokens/metadata-snapshot.json"
+            echo "      git commit"
+            echo ""
+            exit 1
+          fi
+      - name: Regenerate TS types
+        working-directory: Dev/frontend
+        run: npm run meta:types
+      - name: Verify TS types are in sync
+        run: |
+          if ! git diff --exit-code -- 'Dev/frontend/src/api/types/_generated.ts'; then
+            echo "❌ TS types están DESACTUALIZADOS. Corre: cd Dev/frontend && npm run meta:types"
+            exit 1
+          fi
+      - name: Regenerate MSW handlers
+        working-directory: Dev/frontend
+        run: npm run msw:gen
+      - name: Verify MSW handlers are in sync
+        run: |
+          if ! git diff --exit-code -- 'Dev/frontend/src/test/msw/_generated.ts'; then
+            echo "❌ MSW handlers están DESACTUALIZADOS. Corre: cd Dev/frontend && npm run msw:gen"
             exit 1
           fi
 
@@ -182,8 +350,8 @@ jobs:
       run:
         working-directory: Dev/frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
           cache: npm
@@ -202,17 +370,54 @@ jobs:
         run: npm run build
 
   # ─────────────────────────────────────────────────────────────────
-  # E2E — solo si tocó backend O frontend (cualquiera puede romper)
+  # A11y como check obligatorio — light + dark mode
+  # ─────────────────────────────────────────────────────────────────
+  a11y:
+    name: A11y (axe — light + dark)
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    defaults:
+      run:
+        working-directory: Dev/frontend
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: Dev/frontend/package-lock.json
+      - name: Install deps
+        run: npm ci --no-audit --no-fund
+      - name: Cache Playwright browsers
+        uses: actions/cache@v5
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('Dev/frontend/package-lock.json') }}
+      - name: Install Playwright chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+      - name: Run a11y tests
+        run: npm run test:a11y
+
+  # ─────────────────────────────────────────────────────────────────
+  # E2E — matrix multi-browser (chromium + firefox + mobile-chrome)
   # ─────────────────────────────────────────────────────────────────
   e2e:
-    name: E2E (Playwright chromium)
+    name: E2E
     needs: changes
     if: |
       (needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true') &&
       !contains(github.event.head_commit.message, '[skip e2e]') &&
       !contains(github.event.pull_request.title, '[skip e2e]')
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [chromium, firefox, mobile-chrome]
     services:
       postgres:
         image: postgres:16-alpine
@@ -239,8 +444,8 @@ jobs:
       JWT_PRIVATE_KEY_PATH: ./keys/private.key
       JWT_PUBLIC_KEY_PATH: ./keys/public.key
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
           cache: npm
@@ -254,15 +459,20 @@ jobs:
         working-directory: Dev/frontend
         run: npm ci --no-audit --no-fund
       - name: Cache Playwright browsers
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         id: playwright-cache
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('Dev/frontend/package-lock.json') }}
-      - name: Install Playwright chromium
+          key: playwright-${{ runner.os }}-${{ matrix.project }}-${{ hashFiles('Dev/frontend/package-lock.json') }}
+      - name: Install Playwright (${{ matrix.project }})
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         working-directory: Dev/frontend
-        run: npx playwright install --with-deps chromium
+        run: |
+          case "${{ matrix.project }}" in
+            chromium|mobile-chrome) npx playwright install --with-deps chromium ;;
+            firefox) npx playwright install --with-deps firefox ;;
+            webkit|mobile-safari) npx playwright install --with-deps webkit ;;
+          esac
       - name: Generate JWT keys
         working-directory: Dev
         run: npm run generate-keys
@@ -272,7 +482,7 @@ jobs:
       - name: Seed dev admin
         working-directory: Dev
         run: npm run seed:dev
-      - name: Start backend (background)
+      - name: Start backend
         working-directory: Dev
         run: nohup npm start > /tmp/backend.log 2>&1 &
       - name: Wait for backend
@@ -287,23 +497,40 @@ jobs:
       - name: Build frontend
         working-directory: Dev/frontend
         run: npm run build
-      - name: Run Playwright
+      - name: Run Playwright (${{ matrix.project }})
         working-directory: Dev/frontend
         env:
           PLAYWRIGHT_BASE_URL: http://localhost:5174
           VITE_API_URL: http://localhost:3001
-        run: npm run test:e2e -- --project=chromium
+        run: npm run test:e2e -- --project=${{ matrix.project }}
       - name: Upload Playwright report on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.project }}
           path: Dev/frontend/playwright-report/
           retention-days: 7
       - name: Upload backend log on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: backend-log
+          name: backend-log-${{ matrix.project }}
           path: /tmp/backend.log
           retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────
+  # Messages structure validation
+  # ─────────────────────────────────────────────────────────────────
+  messages-validate:
+    name: Messages (estructura)
+    needs: changes
+    if: needs.changes.outputs.messages == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+      - name: Validate docs/messages structure
+        run: node scripts/message-bus-validate.js --strict

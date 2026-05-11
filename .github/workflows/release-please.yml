@@ -1,0 +1,22 @@
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          release-type: node
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # Configuración:
+          #   - release-please-config.json define qué bumps qué (feat→minor, fix→patch, BREAKING→major)
+          #   - .release-please-manifest.json mantiene la versión actual (sin tocar manual)
+          # Genera PR automático con CHANGELOG.md actualizado.
