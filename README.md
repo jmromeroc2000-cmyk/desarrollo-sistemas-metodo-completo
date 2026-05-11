@@ -1,6 +1,6 @@
 # Desarrollo de Sistemas — Método Completo
 
-[![Release](https://img.shields.io/badge/release-v2.0.0-blue)](https://github.com/jmromeroc2000-cmyk/desarrollo-sistemas-metodo-completo/releases/tag/v2.0.0)
+[![Release](https://img.shields.io/badge/release-v3.0.0-blue)](https://github.com/jmromeroc2000-cmyk/desarrollo-sistemas-metodo-completo/releases/tag/v3.0.0)
 
 Método de creación de sistemas en **5 fases** dirigido por **metadata** y
 preparado para **convivencia multi-agente** (backend, frontend, infra
@@ -79,7 +79,72 @@ FASE 5 — PROGRAMACIÓN       /be /ui → backend + frontend leyendo metadata
 | V3 | + 5 + 6 + 7 | + Multi-schema BD + cache + históricos |
 | V4 | + 8 + 9 | + CDN/edge + observabilidad avanzada |
 
-## Lo nuevo en v2.0.0
+## Lo nuevo en v3.0.0 — Portabilidad multi-DBMS
+
+Salto MAJOR sobre v2.0.0. **Requisito firme del usuario**: el método y todos
+los sistemas que produce deben correr sobre PostgreSQL, MySQL, SQL Server,
+Oracle, DB2 y Google Cloud Spanner sin cambios en el código de aplicación.
+
+### Arquitectura de portabilidad
+
+```
+db-adapter pattern:
+  templates/db-adapters/{postgres,mysql,sqlserver,oracle,db2,spanner}/
+
+Capa 1 — app-layer middleware (OBLIGATORIA, los 6 DBMS):
+  protectMetadata bloquea writes HTTP a tablas de metadata.
+  Solo el migration runner activa allowMetadataChange.
+
+Capa 2 — triggers nativos por DBMS (OPCIONAL, defensa-en-profundidad):
+  postgres: plpgsql        oracle: PL/SQL
+  mysql: SQL/PSM          db2:    SQL/PL
+  sqlserver: T-SQL        spanner: ❌ (Spanner no soporta triggers)
+```
+
+### Lo que cada bloque agrega
+
+| Bloque | Aporte |
+|--------|--------|
+| **M1** | `protectMetadata` middleware Express (Capa 1 portable) |
+| **M2** | 6 adapters con interface común — `genUuid`/`now`/`quote`/`upsertSql`/`bypassTriggers`/`applyTriggers` |
+| **M3** | 5 `triggers.sql` nativos (PG/MySQL/SQL Server/Oracle/DB2) + bypass mechanisms por DBMS |
+| **M4** | Migration runner multi-DBMS (`up [N]` / `down N` / `status` / `triggers`) — SQL-92 estricto |
+| **M5** | CI matrix: 3 DBMS obligatorios (PG/MySQL/SQL Server) + 2 opt-in (Oracle/DB2) + Spanner emulator |
+| **M6** | Helpers de test portables — `withTestClient`, `runQuery`, `countRows`, `cleanTables`, `bypassTriggers` |
+| **M7** | Docs CLAUDE.md §13.2a, CHANGELOG, PR + tag v3.0.0 |
+
+### Breaking changes (v2.0.0 → v3.0.0)
+
+1. **`SET LOCAL app.allow_metadata_change` removido** — bypass ahora vive
+   en `app.locals.allowMetadataChange` (app-layer). Migration runner
+   activa el flag DBMS-específico via `adapter.beginMetadataChange(client)`.
+
+2. **Migraciones SIN `BEGIN/COMMIT` explícitos** — el runner abre/cierra
+   transacciones via adapter. Las migraciones son SQL-92 puro.
+
+3. **`gen_random_uuid()`, `clock_timestamp()`, `JSONB` removidos** —
+   UUIDs los genera la app, timestamps son ISO 8601 strings en `VARCHAR(40)`,
+   JSON se serializa a `VARCHAR(N)` con validación Zod en app.
+
+4. **Triggers fuera de migraciones** — ya no se crean en `mig_005.up.sql`
+   ni `mig_008.up.sql`. Se aplican post-bootstrap via
+   `node scripts/migrate.js triggers`.
+
+5. **Tests: prohibido `WHERE ts > $1` con $1 = JS Date** — flaky por
+   diferencia de precisión entre los 6 DBMS. Usar `countRows()` /
+   `ORDER BY ts DESC LIMIT 1`.
+
+### CI matrix
+
+| Workflow | DBMS | Disparador | Bloquea merge |
+|----------|------|-----------|---------------|
+| `ci-matrix.yml` | postgres + mysql + sqlserver | push/PR a main | ✅ |
+| `ci-matrix-opt.yml` | oracle + db2 | workflow_dispatch / label | ❌ |
+| `ci-matrix.yml::spanner-emulator` | Spanner emulator | workflow_dispatch / path 'spanner' | ❌ |
+
+---
+
+## Lo nuevo en v2.0.0 (release anterior)
 
 Salto mayor sobre v1.1.0. Incorpora 30+ items revisados por el frontend agent
 tras correr SistemaINV en producción (v1.4.0 → v1.4.9).
@@ -203,6 +268,9 @@ real que la motivó.
 **Releases:**
 - v1.0.0 — Método V1 base
 - v1.1.0 — Convivencia multi-agente (mutable state)
-- **v2.0.0** — Append-only + codegen funcional + multi-browser CI +
+- v2.0.0 — Append-only + codegen funcional + multi-browser CI +
   contratos canónicos del API + rollback up/down + secrets multi-modo +
   i18n + 16 memorias pre-cargadas
+- **v3.0.0** — Portabilidad multi-DBMS (6 DBMS) + Capa 1/Capa 2 +
+  SQL-92 estricto + helpers de test portables + CI matrix (3 DBMS
+  bloqueantes + 2 opt-in + Spanner emulator)

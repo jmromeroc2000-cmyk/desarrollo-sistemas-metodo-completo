@@ -5,7 +5,7 @@
 
 ## Gotchas técnicos — Backend (feedback)
 
-- [pg-timestamp-precision](pg-timestamp-precision.md) — pg μs vs JS Date ms: nunca comparar con `>`/`<`. Usar count-before/after o `ORDER BY ts DESC LIMIT 1`.
+- [timestamp-precision-cross-dbms](timestamp-precision-cross-dbms.md) — los 6 DBMS usan precisión distinta (μs/ns/ms). Comparar ts con `>` contra JS Date es flaky. Usar count-before/after.
 - [trigger-double-insert](trigger-double-insert.md) — si una tabla tiene trigger AFTER UPDATE que inserta en bitácora, NO duplicar INSERT en service. PK colisiona.
 - [session-replication-role](session-replication-role.md) — bypass de triggers en tests: `SET session_replication_role = replica`. Solo en tests.
 - [set-local-transaction](set-local-transaction.md) — `SET LOCAL` requiere transacción explícita (BEGIN/COMMIT). Sin ella no surte efecto.

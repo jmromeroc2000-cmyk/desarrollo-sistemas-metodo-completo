@@ -1,0 +1,327 @@
+name: CI matrix (multi-DBMS)
+
+# Corre la suite contra los 3 DBMS obligatorios en CI:
+#   PostgreSQL 16, MySQL 8, SQL Server 2022
+#
+# Oracle, DB2 y Spanner viven en ci-matrix-opt.yml (workflow_dispatch
+# manual + emulator), porque requieren containers comerciales o setup
+# adicional. Su CI no es bloqueante para merge.
+
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'LICENSE'
+      - '*.md'
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'LICENSE'
+      - '*.md'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────
+  # Detectar paths que disparan matrix
+  # ─────────────────────────────────────────────────────────────────
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      matrix-run: ${{ steps.filter.outputs.run }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            run:
+              - 'Dev/src/**'
+              - 'Dev/migrations/**'
+              - 'Dev/tests/**'
+              - 'Dev/package*.json'
+              - 'templates/db-adapters/**'
+              - 'templates/migrate.js'
+              - 'templates/migrations/**'
+              - '.github/workflows/ci-matrix.yml'
+
+  # ─────────────────────────────────────────────────────────────────
+  # MATRIX: postgres + mysql + sqlserver
+  # Cada DBMS recibe su container con health check, aplica migraciones
+  # + triggers + tests.
+  # ─────────────────────────────────────────────────────────────────
+  backend-matrix:
+    name: Backend (${{ matrix.dbms }})
+    needs: changes
+    if: needs.changes.outputs.matrix-run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dbms: postgres
+            image: postgres:16-alpine
+            port: 5432
+            db_name: sistema_test
+            db_user: testuser
+            db_pass: testpassword
+            health: pg_isready -U testuser -d sistema_test
+            extra_env: {}
+          - dbms: mysql
+            image: mysql:8
+            port: 3306
+            db_name: sistema_test
+            db_user: testuser
+            db_pass: testpassword
+            health: mysqladmin ping -h localhost -u root -proot
+            extra_env:
+              MYSQL_ROOT_PASSWORD: root
+              MYSQL_DATABASE: sistema_test
+              MYSQL_USER: testuser
+              MYSQL_PASSWORD: testpassword
+          - dbms: sqlserver
+            image: mcr.microsoft.com/mssql/server:2022-latest
+            port: 1433
+            db_name: master  # sistema_test se crea como parte del job
+            db_user: sa
+            db_pass: yourStrong!Password1
+            health: /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'yourStrong!Password1' -Q "SELECT 1" -No
+            extra_env:
+              ACCEPT_EULA: 'Y'
+              SA_PASSWORD: 'yourStrong!Password1'
+              MSSQL_PID: Developer
+    services:
+      postgres:
+        image: ${{ matrix.dbms == 'postgres' && matrix.image || '' }}
+        env:
+          POSTGRES_DB: sistema_test
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpassword
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U testuser -d sistema_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      mysql:
+        image: ${{ matrix.dbms == 'mysql' && matrix.image || '' }}
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: sistema_test
+          MYSQL_USER: testuser
+          MYSQL_PASSWORD: testpassword
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost -u root -proot"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      sqlserver:
+        image: ${{ matrix.dbms == 'sqlserver' && matrix.image || '' }}
+        env:
+          ACCEPT_EULA: Y
+          SA_PASSWORD: yourStrong!Password1
+          MSSQL_PID: Developer
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P yourStrong\!Password1 -Q \"SELECT 1\" -No"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 20
+          --health-start-period 30s
+
+    env:
+      NODE_ENV: test
+      SYSTEM_MODE: DEBUG
+      DB_DRIVER: ${{ matrix.dbms }}
+      DB_HOST: localhost
+      DB_PORT: ${{ matrix.port }}
+      DB_NAME: ${{ matrix.db_name }}
+      DB_USER: ${{ matrix.db_user }}
+      DB_PASSWORD: ${{ matrix.db_pass }}
+      LOG_LEVEL: error
+      JWT_PRIVATE_KEY_PATH: ./keys/private.key
+      JWT_PUBLIC_KEY_PATH: ./keys/public.key
+
+    defaults:
+      run:
+        working-directory: Dev
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: Dev/package-lock.json
+
+      - name: Install deps (drivers ${{ matrix.dbms }})
+        run: npm ci --no-audit --no-fund
+
+      - name: SQL Server — crear DB sistema_test (no se crea en init)
+        if: matrix.dbms == 'sqlserver'
+        run: |
+          # sqlcmd no viene en runners de GHA; usar el del container
+          docker exec $(docker ps -q -f ancestor=mcr.microsoft.com/mssql/server:2022-latest) \
+            /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'yourStrong!Password1' \
+            -Q "CREATE DATABASE sistema_test" -No
+          echo "DB_NAME=sistema_test" >> $GITHUB_ENV
+
+      - name: Generate JWT keys
+        run: npm run generate-keys
+
+      - name: Apply migrations (up)
+        run: node scripts/migrate.js up
+
+      - name: Apply triggers nativos
+        run: node scripts/migrate.js triggers
+
+      - name: Run tests portables
+        run: npm test
+
+      - name: Status final
+        if: always()
+        run: node scripts/migrate.js status
+
+  # ─────────────────────────────────────────────────────────────────
+  # MIGRATION REHEARSAL: up → down → up cycle por DBMS
+  # Detecta migraciones que no son reversibles correctamente.
+  # ─────────────────────────────────────────────────────────────────
+  migration-rehearsal:
+    name: Migration rehearsal (${{ matrix.dbms }})
+    needs: changes
+    if: needs.changes.outputs.matrix-run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        dbms: [postgres, mysql, sqlserver]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_DB: rehearsal, POSTGRES_USER: testuser, POSTGRES_PASSWORD: testpassword }
+        ports: [ '5432:5432' ]
+        options: >-
+          --health-cmd "pg_isready -U testuser -d rehearsal"
+          --health-interval 5s
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: rehearsal
+          MYSQL_USER: testuser
+          MYSQL_PASSWORD: testpassword
+        ports: [ '3306:3306' ]
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost -u root -proot"
+          --health-interval 5s
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          SA_PASSWORD: yourStrong!Password1
+          MSSQL_PID: Developer
+        ports: [ '1433:1433' ]
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P yourStrong\!Password1 -Q \"SELECT 1\" -No"
+          --health-interval 10s
+          --health-start-period 30s
+    env:
+      DB_DRIVER: ${{ matrix.dbms }}
+      DB_HOST: localhost
+      DB_NAME: rehearsal
+      DB_USER: ${{ matrix.dbms == 'sqlserver' && 'sa' || 'testuser' }}
+      DB_PASSWORD: ${{ matrix.dbms == 'sqlserver' && 'yourStrong!Password1' || 'testpassword' }}
+      DB_PORT: ${{ matrix.dbms == 'postgres' && '5432' || matrix.dbms == 'mysql' && '3306' || '1433' }}
+    defaults:
+      run:
+        working-directory: Dev
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: Dev/package-lock.json
+      - run: npm ci --no-audit --no-fund
+
+      - name: SQL Server — crear DB rehearsal
+        if: matrix.dbms == 'sqlserver'
+        run: |
+          docker exec $(docker ps -q -f ancestor=mcr.microsoft.com/mssql/server:2022-latest) \
+            /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'yourStrong!Password1' \
+            -Q "CREATE DATABASE rehearsal" -No
+
+      - name: Step 1 — UP (todas pendientes)
+        run: node scripts/migrate.js up
+
+      - name: Step 2 — DOWN al 0 (revertir todo)
+        run: node scripts/migrate.js down 0
+
+      - name: Step 3 — UP de nuevo (verifica que sigue funcionando)
+        run: node scripts/migrate.js up
+
+      - name: Step 4 — Status final
+        run: node scripts/migrate.js status
+
+  # ─────────────────────────────────────────────────────────────────
+  # Spanner emulator (opcional — corre solo si workflow_dispatch o
+  # cuando se cambia explícitamente el adapter de Spanner)
+  # ─────────────────────────────────────────────────────────────────
+  spanner-emulator:
+    name: Spanner emulator (opcional)
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      contains(toJSON(github.event.pull_request.changed_files), 'spanner')
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    services:
+      spanner:
+        image: gcr.io/cloud-spanner-emulator/emulator
+        ports:
+          - 9010:9010   # gRPC
+          - 9020:9020   # REST
+    env:
+      SPANNER_EMULATOR_HOST: localhost:9010
+      DB_DRIVER: spanner
+      GCP_PROJECT: test-project
+      SPANNER_INSTANCE: test-instance
+      DB_NAME: test-db
+    defaults:
+      run:
+        working-directory: Dev
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with: { node-version: '20' }
+      - run: npm ci --no-audit --no-fund
+
+      - name: Crear instance + database en emulator
+        run: |
+          # Spanner emulator requiere setup explícito
+          curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -d '{"instanceId":"test-instance","instance":{"config":"emulator-config","displayName":"test","nodeCount":1}}' \
+            http://localhost:9020/v1/projects/test-project/instances
+          curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -d '{"createStatement":"CREATE DATABASE `test-db`"}' \
+            http://localhost:9020/v1/projects/test-project/instances/test-instance/databases
+
+      - name: Apply migrations (Spanner)
+        run: node scripts/migrate.js up
+
+      - name: Tests portables (sin triggers — Spanner usa solo Capa 1)
+        run: npm test

@@ -2045,16 +2045,20 @@ Para ver método de fases: /fases
 └── Prod/                       ← PROD local (build + preview en :5174)
 ```
 
-### 13.2 Stack técnico (fijo)
+### 13.2 Stack técnico (fijo, multi-DBMS desde v3.0.0)
 
 ```yaml
 backend (Dev/):
   runtime:    Node.js >=20 LTS
   framework:  Express 4
-  db:         PostgreSQL 16
+  db:         multi-DBMS via db-adapter pattern (templates/db-adapters/)
+              Soportados: PostgreSQL 16+ | MySQL 8+ | SQL Server 2019+ |
+                          Oracle 19c+   | DB2 LUW 11+ | Cloud Spanner
+              Default:    PostgreSQL 16
+              Selección:  env DB_DRIVER en .env del proyecto
   cache:      Redis (modo PERFORMANCE)
   auth:       JWT RS256 con refresh tokens
-  testing:    Vitest 4 + Supertest
+  testing:    Vitest 4 + Supertest + helpers portables (templates/tests/helpers/)
 
 frontend (Dev/frontend/):
   bundler:    Vite 8
@@ -2074,6 +2078,55 @@ tooling_ui:
   state_audit:      Dev/frontend/scripts/audit-states.js (informativo)
   pre_commit:       Husky + lint-staged en .husky/
 ```
+
+### 13.2a Matriz de soporte multi-DBMS (v3.0.0+)
+
+> El método soporta 6 DBMS sin cambios en el código de aplicación. Solo
+> cambia `DB_DRIVER` env var. Detalle completo en `templates/db-adapters/README.md`.
+
+| DBMS | Capa 1 (app middleware) | Capa 2 (triggers BD) | CI bloqueante | Driver npm |
+|------|------------------------|----------------------|---------------|-----------|
+| PostgreSQL 16+ | ✅ | ✅ plpgsql | ✅ ci-matrix.yml | `pg` |
+| MySQL 8+       | ✅ | ✅ SQL/PSM   | ✅ ci-matrix.yml | `mysql2` |
+| SQL Server 2019+ | ✅ | ✅ T-SQL    | ✅ ci-matrix.yml | `mssql` |
+| Oracle 19c+    | ✅ | ✅ PL/SQL    | ❌ ci-matrix-opt | `oracledb` |
+| DB2 LUW 11+    | ✅ | ✅ SQL/PL    | ❌ ci-matrix-opt | `ibm_db` |
+| Cloud Spanner  | ✅ | ❌ no soporta | 🔶 spanner-emulator (opt-in) | `@google-cloud/spanner` |
+
+**Capa 1 (obligatoria, todos los DBMS):** middleware Express
+`protectMetadata` que bloquea writes HTTP a tablas de metadata. La
+autorización solo se concede al migration runner via
+`app.locals.allowMetadataChange = true`.
+
+**Capa 2 (opcional, defensa-en-profundidad):** triggers nativos que
+bloquean SQL directo (DBA, herramientas externas). Cada DBMS tiene su
+sintaxis (`templates/db-adapters/<dbms>/triggers.sql`). El migration
+runner los aplica via `node scripts/migrate.js triggers`. Spanner queda
+solo con Capa 1 por limitación del DBMS.
+
+**Bypass del runner (session-scoped, distinto por DBMS):**
+
+| DBMS | Mecanismo |
+|------|-----------|
+| postgres | `current_setting('app.allow_metadata_change', true)` |
+| mysql | User variable `@app_allow_metadata_change` |
+| sqlserver | `SESSION_CONTEXT(N'allow_metadata_change')` |
+| oracle | `SYS_CONTEXT('APP_CTX', 'allow_metadata_change')` + paquete `APP_CTX_PKG` |
+| db2 | Global variable `app_allow_metadata_change` |
+| spanner | N/A — sin triggers |
+
+**SQL portable:** las migraciones son **SQL-92 estricto** sin
+`BEGIN/COMMIT` explícitos (el runner abre/cierra transacciones).
+Tipos uniformes: `CHAR(36)` UUIDs, `SMALLINT 0|1` booleans, `VARCHAR(40)`
+para ISO 8601 timestamps. Detalle en
+`templates/migrations/PORTABLE-SQL.md`.
+
+**Tests portables:** los tests usan helpers de
+`templates/tests/helpers/db-test-helper.js`:
+`withTestClient`, `runQuery`, `countRows`, `cleanTables`,
+`bypassTriggers`. Patrón canónico: count-before/after en lugar de
+`WHERE ts > $1` (que es flaky por la diferencia de precisión de
+timestamps entre DBMS — ver `memory/timestamp-precision-cross-dbms.md`).
 
 ### 13.3 Convenciones de código (fijas)
 
@@ -3044,8 +3097,10 @@ Cero merge conflicts entre agentes (solo el owner toca su archivo).
 
 ---
 
-*CLAUDE.md v3.2 — Método Completo de Desarrollo de Sistemas*
+*CLAUDE.md v3.3 — Método Completo de Desarrollo de Sistemas*
 *17 modos · 5 fases · 9 niveles de metadata · 4 versiones del sistema*
 *+ Convivencia multi-agente APPEND-ONLY · Backend DoD §F contratos canónicos*
 *+ Codegen TS+MSW+OpenAPI funcional · CI multi-browser + paths-filter*
+*+ Portabilidad multi-DBMS (PG/MySQL/SQL Server/Oracle/DB2/Spanner)*
+*+ Capa 1 app-layer + Capa 2 triggers nativos opcional · SQL-92 estricto*
 *Citación APA 7ª edición · Mayo 2026*
