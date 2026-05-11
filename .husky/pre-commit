@@ -1,0 +1,24 @@
+#!/usr/bin/env sh
+# pre-commit hook compuesto. Ejecuta TODOS los checks; si uno falla, aborta
+# antes de seguir con los demás. No swallowing de errores con `|| true`.
+
+set -e
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# 1. Orphan-migration check — detecta regresión silenciosa (mig untracked + src staged)
+"$REPO_ROOT/scripts/orphan-migration-check.sh"
+
+# 2. lint-staged si está disponible (frontend usa esto para preflight + eslint)
+if [ -f "$REPO_ROOT/Dev/frontend/package.json" ] && \
+   grep -q '"lint-staged"' "$REPO_ROOT/Dev/frontend/package.json" 2>/dev/null; then
+    (cd "$REPO_ROOT/Dev/frontend" && npx lint-staged) || exit 1
+fi
+
+# 3. Preflight backend (si existe el script)
+if [ -f "$REPO_ROOT/Dev/scripts/preflight.sh" ]; then
+    "$REPO_ROOT/Dev/scripts/preflight.sh" || exit 1
+fi
+
+# 4. Verificación de mensaje commit (conventional commits) — ver commit-msg hook
+#    (este file es pre-commit; el formato del mensaje se valida en commit-msg)

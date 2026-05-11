@@ -216,6 +216,8 @@ Si no se especifica modo, opera en modo neutro (sección 3).
 | `/meta` | Diseñador de metadata | Tablas, campos, procesos, semáforos, variables, componentes | **Fase 1** |
 | `/arq` | Arquitecto derivado de metadata | Diagramas, decisiones, propuesta de stack | **Fase 2** |
 | `/dev` | Programador / Diseñador de sistemas | Arquitectura, código, infraestructura | Fases 3-5 |
+| `/be` | Programador Backend (disciplinado) | Endpoints, migraciones, módulos backend — enforced §5.1.2 | Fase 5 |
+| `/ui` | Programador Frontend UI (disciplinado) | Pantallas, mutations, design system — enforced §5.1.1 | Fase 5 |
 | `/edu` | Capacitador — Aprendizaje Significativo | Pedagogía, diseño instruccional, competencias | Cross |
 | `/inv` | Investigador | Análisis riguroso, evidencia, epistemología |
 | `/fin` | Experto en Finanzas | Análisis financiero, valoración, mercados |
@@ -579,6 +581,196 @@ backend con sus tests, después la UI. Nunca inventar endpoints.
 - Husky pre-commit en .husky/pre-commit — preflight antes de cada commit
 - Sub-agente `ui-reviewer` (en .claude/agents/) — revisión semántica
 - Skill `/ui` (en .claude/skills/ui/) — modo disciplinado obligatorio
+
+---
+
+### 5.1.2 BACKEND — DEFINITION OF DONE OBLIGATORIO
+
+> **Aplica a cualquier feature de backend** (endpoint, migración, módulo,
+> trigger BD, calculadora de semáforo) en proyectos con stack Node + Express +
+> PostgreSQL.
+>
+> **Origen:** sesión v1.4.6 → v1.4.9 acumuló 4 bugs invisibles porque cada uno
+> pasaba tests local y fallaba CI o producción silenciosamente:
+> (1) doble INSERT a `variables_historia` por trigger no leído; (2) test
+> "valor idéntico" fallaba en CI por comparación `pg μs > js ms`; (3) regresión
+> silenciosa por migración untracked + service modificado; (4) endpoint cancelar
+> OC sin trazabilidad. Este checklist NO es opcional.
+
+#### A) ANTES de escribir código backend — auditoría de contrato
+
+```
+□ Leer Dev/src/modules/<X>/routes.js
+    — confirmar autorización (authorize, maintenanceGuard, checkGating)
+    — confirmar que el endpoint NO existe ya con otro nombre
+□ Leer Dev/src/modules/<X>/controller.js
+    — confirmar shape del request/response
+    — convención case del módulo (snake_case vs camelCase varía POR módulo)
+□ Leer Dev/src/modules/<X>/queries.js
+    — confirmar columnas del SELECT y JOINs existentes
+□ Para CADA tabla que vas a tocar: SELECT triggers
+    psql \d <tabla>  — los triggers BD pueden auto-insertar/auto-validar.
+    Si tu service hace INSERT y el trigger también → PK colisiona.
+□ Para CADA columna nueva: verificar que está en `campos_sistema`
+    (metadata-driven). Si no, agregar la fila en la misma migración.
+```
+
+Si el endpoint requiere columnas nuevas → **migración va PRIMERO en el commit**,
+nunca después del service. Sin esto la regresión es silenciosa: CI verde,
+producción rota.
+
+#### B) AL ESCRIBIR el módulo / migración
+
+```
+□ Patrón 4-archivos: queries.js → service.js → controller.js → routes.js.
+  Funciones puras en queries, lógica en service, HTTP en controller.
+
+□ Migración numerada secuencialmente (NNN_descripcion.sql) con:
+    BEGIN;
+    SET LOCAL app.allow_metadata_change = 'true';   -- si toca metadata
+    ...
+    INSERT INTO metadata_versiones (...) VALUES (...);  -- bump SemVer
+    COMMIT;
+  Sin BEGIN/COMMIT explícitos, migrate.js no detecta fallo mid-archivo.
+
+□ TIMESTAMP vs Date — NUNCA comparar `pg TIMESTAMP` (μs) contra
+  `JS Date` (ms) con `>`/`<` en query. node-pg trunca a ms al convertir.
+  Patrones aceptables:
+    · count-before / count-after (no compara timestamps)
+    · ORDER BY ts DESC LIMIT 1 (toma la última sin filtro)
+    · date_trunc('milliseconds', ts) en AMBOS lados
+
+□ Triggers BD que auto-insertan en bitácora: NO duplicar el INSERT en el
+  service. Para pasar metadata adicional usar `SET LOCAL app.audit_X = ...`
+  y leer en el trigger con `current_setting('app.audit_X', true)`. El
+  parámetro `true` evita error si la variable no existe.
+
+□ Endpoints de escritura siempre con `authenticate + authorize(ROLES) +
+  maintenanceGuard + checkGating(OPERACION)`. Endpoints de lectura sin
+  maintenanceGuard. Endpoints administrativos (registrar respaldo,
+  cambiar SYSTEM_MODE) sin maintenanceGuard.
+
+□ Idempotencia donde aplique: re-llamadas a confirmar/cancelar/registrar
+  deben devolver 200 con el estado actual, no 409. Evita doble-click bugs.
+
+□ Trazabilidad de cambios de estado: si agregas estado X, agrega también
+  `X_en TIMESTAMP` + `X_por CHAR(36)` con FK a usuarios. Sin trazabilidad
+  no hay auditoría.
+```
+
+#### C) ANTES de marcar HECHO — verificación end-to-end
+
+```
+□ npm run typecheck && npm run lint     → verde
+□ npm test (suite completa)             → verde
+□ npm run migrate desde fresh DB        → todas las migraciones aplican
+    BD efímera: createdb tmp_test && DB_NAME=tmp_test npm run migrate
+    Si una mig falla aquí, falla en CI con fresh checkout.
+□ `git status` limpio antes del commit:
+    - sin migraciones untracked junto a src/** modificado
+    - sin variables_historia/triggers BD aplicados sin la migración versionada
+    (regresión silenciosa: el pre-commit hook `orphan-migration-check`
+    bloquea esto automáticamente)
+□ Smoke con curl al endpoint (caso real, no mockeado):
+    - happy path → 200/201
+    - auth faltante → 401
+    - rol incorrecto → 403
+    - input inválido → 400
+    - recurso inexistente → 404
+□ Si renombras un patrón (endpoint, columna, módulo): grep para todas
+  las referencias en queries.js + service.js + tests + docs + frontend.
+```
+
+#### D) Por tipo de feature — verificaciones extra
+
+**Migración que extiende un trigger:**
+```
+□ El trigger original tiene `CREATE OR REPLACE FUNCTION` → tu mig puede
+  redefinirlo sin DROP. Verificar con \df+ que la nueva versión quedó.
+□ Si la mig solo cambia el trigger (sin DDL) no necesita rollback.
+□ Test que verifica la nueva captura (motivo, ip_origen, etc.).
+```
+
+**Endpoint de cancelar/desactivar:**
+```
+□ Validar estado actual (PENDIENTE → CANCELADA solo desde estados válidos).
+□ Idempotente: cancelar algo ya CANCELADA devuelve 200, no 409.
+□ Persistir `cancelada_en` + `cancelada_por` (espejo de confirmada_en/por).
+□ Mensaje claro en el 409 cuando el estado no permite la transición.
+```
+
+**Test de integración con triggers BD complejos:**
+```
+□ Si el test inserta en tabla con trigger inmutable: usar
+  `SET session_replication_role = replica` solo en setup/cleanup.
+□ Si necesita usuario `protegido=1`: el trigger
+  `usuarios_protegidos_no_desactivar` NO tiene bypass por flag — bypass
+  triggers via session_replication_role o usa un usuario fresh.
+□ NO comparar timestamps con `>` entre tabla y snapshot Date:
+  count-before / count-after es order-independent.
+```
+
+#### E) Comportamiento prohibido
+
+```
+✗ Marcar "completado" sin correr `npm run migrate` desde BD fresh
+✗ Push directo a `main` — solo PRs con CI verde (rama protegida)
+✗ Comparar `pg TIMESTAMP > $1` cuando $1 es JS Date
+✗ Duplicar INSERT en service cuando trigger BD ya inserta
+✗ Agregar columnas trazables (estado_en, estado_por) sin la FK a usuarios
+✗ Commit con migración untracked y service modificado en mismo workspace
+✗ Tests que asumen state previo de otros tests (snapshot global)
+✗ Tests que dependen de orden de ejecución (vitest puede reordenar)
+✗ DELETE/UPDATE de bitácora inmutable (variables_historia, audit_log)
+✗ Mergear sin leer último mensaje del otro agente en docs/messages/open/
+```
+
+#### Tooling enforce de esta sección
+
+- `.husky/pre-commit` — corre `scripts/orphan-migration-check.sh`
+- `.github/workflows/ci.yml` job `migrations-clean-apply` — fresh DB + migrate
+- Sub-agente `be-reviewer` (en `.claude/agents/`) — revisión semántica del diff
+- Skill `/be` (en `.claude/skills/be/`) — modo disciplinado obligatorio
+
+---
+
+### 5.1.3 TESTS — INDEPENDENCIA DE ORDEN Y ESTADO (OBLIGATORIO)
+
+> Bug recurrente: test pasa local 10/10 veces, falla CI 1/3 por orden o por
+> precisión de timestamp. Reglas para evitarlo:
+
+```
+□ Snapshot before/after counts en vez de filtros temporales:
+    const before = await c.query('SELECT COUNT(*) FROM tabla WHERE ...');
+    // ...acción...
+    const after  = await c.query('SELECT COUNT(*) FROM tabla WHERE ...');
+    expect(after).toBe(before);
+
+□ Buscar última fila vía ORDER BY ts DESC LIMIT 1, no `ts > snapshot`.
+
+□ Cada test creates sus propios fixtures; cada describe limpia su state.
+  Evitar variables compartidas entre `it` que afecten siguientes tests.
+
+□ Si un test necesita marcar un usuario como `protegido=1` u otro estado
+  bloqueado por trigger, bypass via:
+    SET session_replication_role = replica;
+    -- operación
+    SET session_replication_role = DEFAULT;
+  SOLO en tests; NUNCA en código de producción.
+
+□ Tests que comparten BD (vitest fileParallelism=false) deben tolerar
+  acumulación de filas inmutables (variables_historia, audit_log).
+  Filtrar por la fila NUEVA, no por "todas las filas".
+
+□ Tests con setTimeout para ordenar inserts por tiempo: NO confiar en ms;
+  insertar directo con `creado_en = NOW() - INTERVAL '5 seconds'` para
+  garantizar diferencias determinísticas.
+
+□ Vitest config recomendada (vitest.config.js):
+    pool: 'forks'              // procesos aislados
+    fileParallelism: false      // BD compartida no paraleliza
+    sequence.shuffle: false     // orden determinístico para debugging
+```
 
 ---
 
@@ -1658,7 +1850,18 @@ Para ver método de fases: /fases
 │   │   └── ui-reviewer.md     ← sub-agente de revisión de UI
 │   └── settings.local.json    ← permisos por máquina (no versionar contenido sensible)
 ├── .husky/
-│   └── pre-commit             ← corre lint-staged + preflight
+│   └── pre-commit             ← corre lint-staged + preflight + orphan-migration-check
+├── docs/
+│   ├── messages/              ← canal de mensajes entre agentes (§14)
+│   │   ├── README.md          ← protocolo + frontmatter schema
+│   │   ├── open/              ← mensajes activos (sin respuesta o sin cerrar)
+│   │   └── archived/          ← respondidos/cerrados, conservados por trazabilidad
+│   ├── PENDIENTES.md          ← living document — single source of truth de pendientes
+│   ├── CHANGELOG.md           ← generado desde conventional commits (release-please)
+│   └── (docs de producto numerados)
+├── memory/                     ← memoria persistente (Claude Code la auto-lee)
+│   ├── MEMORY.md              ← índice (≤200 líneas)
+│   └── *.md                   ← entries individuales con frontmatter
 ├── Dev/                        ← BACKEND (Node + Express + Postgres)
 │   ├── package.json
 │   ├── server.js
@@ -1743,6 +1946,82 @@ restricciones:
   - No asumir herramientas instaladas sin verificar primero
   - No recomendar librerías sin especificar versión compatible
 ```
+
+### 13.3 Versionado y documentación (fija)
+
+> **Regla de oro:** la versión del sistema vive en un solo lugar.
+> Duplicarla en headers de docs causa drift y trabajo manual cada release.
+
+```
+FUENTES DE VERSIÓN (en orden de autoridad):
+  1. git tag (vN.M.P)                       — autoritativo, único inmutable
+  2. package.json (.version)                — sincronizado con el tag
+  3. docs/CHANGELOG.md                      — narrativa por versión
+  4. metadata_versiones (BD)                — versión de metadata, separada del producto
+
+PROHIBIDO:
+  ✗ Headers `# Foo — SistemaINV v1.X.X` en cada doc
+  ✗ Footers `*SistemaINV v1.X.X · Fecha · ...` en cada doc
+  ✗ Subheaders `> Versión: 1.X.X · Fecha: YYYY-MM-DD` per-doc
+
+ACEPTADO:
+  ✓ Headers planos: `# Modelo de Datos`
+  ✓ Footers con generador: `*Generado desde commit abc123 — ver CHANGELOG*`
+  ✓ Referencia desde docs a CHANGELOG.md para historial
+  ✓ docs/16-roadmap.md SÍ contiene tabla por versión — es el roadmap, no
+    headers per-archivo
+
+CHANGELOG.md:
+  - Generado automáticamente desde conventional commits con release-please.
+  - Scopes: feat(be|fe|infra|meta|deps): / fix(be|fe|...): / perf(...): /
+    refactor(...):
+  - BREAKING CHANGE en body → major bump
+  - feat → minor; fix/perf/refactor → patch
+  - docs/chore NO entran al changelog público
+```
+
+### 13.3a Convención de ramas (fija, obligatoria con múltiples agentes)
+
+> Cuando dos agentes (backend y frontend) trabajan en paralelo, el prefijo
+> de la rama identifica al dueño y previene conflictos. Aplica TAMBIÉN
+> cuando trabaja un solo agente — facilita filtrar PRs por scope.
+
+```yaml
+ramas:
+  feat/be-<descripcion>     # feature backend (Dev/src/, Dev/migrations/)
+  feat/fe-<descripcion>     # feature frontend (Dev/frontend/)
+  fix/be-<descripcion>      # bugfix backend
+  fix/fe-<descripcion>      # bugfix frontend
+  chore/be-<descripcion>    # mantenimiento backend (deps, CI)
+  chore/fe-<descripcion>    # mantenimiento frontend
+  chore/docs-<descripcion>  # solo docs/ — no dispara CI gracias a paths-ignore
+  hotfix/<descripcion>      # emergencia en main (con PR igual, fast-track review)
+
+prohibidos:
+  - feat/<sin-prefijo>      # ambiguo, no se ve el dueño
+  - usuario/<nombre>        # no escala a múltiples sistemas
+  - master, develop         # solo `main` como branch principal
+```
+
+**Branch protection en `main`** (configurar en GitHub Settings → Branches):
+
+```
+Require a pull request before merging          ✓
+  Require approvals: 1 (humano o sub-agente reviewer)
+  Dismiss stale approvals when new commits pushed  ✓
+Require status checks to pass before merging    ✓
+  Require branches to be up to date              ✓
+  Status checks: backend, frontend, e2e, migrations-clean-apply
+Require conversation resolution before merging  ✓
+Do not allow bypassing the above settings        ✓
+Restrict who can push to matching branches      ✓ (nadie directo)
+Allow force pushes: NO
+Allow deletions: NO
+```
+
+Sin estas reglas, dos agentes pueden pushear directo a main y romperse
+mutuamente (caso real: v1.4.8 → v1.4.9, un agente rompió main que el
+otro debía consumir).
 
 ### 13.4 Roles del sistema (fijos)
 
@@ -2222,6 +2501,146 @@ ALTA/MEDIA/BAJA con archivo:línea para cada hallazgo.
 
 ---
 
-*CLAUDE.md v3.0 — Método Completo de Desarrollo de Sistemas*
+## 18. CONVIVENCIA MULTI-AGENTE — PROTOCOLO OBLIGATORIO
+
+> Cuando dos o más agentes Claude (backend, frontend, infra) trabajan en
+> paralelo sobre el mismo repo, este protocolo previene conflictos,
+> regresiones silenciosas y mensajes perdidos.
+>
+> **Origen del protocolo:** sesión v1.4.0 → v1.4.9 de SistemaINV. Backend y
+> frontend agents colaborando — descubrimos que sin reglas explícitas:
+> (1) mensajes inter-agente se entremezclaban con docs de producto;
+> (2) un agente pusheaba a main rompiendo el branch del otro;
+> (3) regresión silenciosa por migración untracked + service modificado
+> que pasó CI por casualidad. Estos 3 escenarios están bloqueados por
+> el protocolo siguiente.
+
+### 18.1 Canal de mensajes: `docs/messages/`
+
+```
+docs/messages/
+├── README.md          ← frontmatter schema + ejemplos
+├── open/              ← mensajes activos (sin respuesta o sin cerrar)
+│   └── YYYY-MM-DD-HHmm-from-X-to-Y-tema.md
+└── archived/          ← respondidos/cerrados (conservados por trazabilidad)
+    └── YYYY-MM-DD-HHmm-from-X-to-Y-tema.md
+```
+
+Cada mensaje empieza con frontmatter YAML:
+
+```yaml
+---
+from:    backend           # o frontend, infra
+to:      frontend           # o backend, infra, all
+created: 2026-05-10T22:00:00-06:00
+subject: Pendientes detectados post v1.4.8
+closes:  []                 # IDs/files de mensajes que esta cierra
+state:   open               # open | responded | closed
+labels:  [migration, blocker]
+---
+```
+
+**Reglas:**
+
+- Al ENVIAR: crear archivo en `open/` con frontmatter.
+- Al RESPONDER: actualizar `state: responded` + crear nuevo mensaje (también en `open/`)
+  con `closes: [archivo-anterior.md]`.
+- Al CERRAR (acción completada): mover el thread completo a `archived/`,
+  `state: closed`.
+- Al ABRIR sesión: cada agente DEBE leer `docs/messages/open/` antes de
+  empezar trabajo (filtrar por `to: <mi-agente>` o `to: all`).
+- Prohibido: mensajes inter-agente fuera de `docs/messages/`. Si encuentras
+  un mensaje suelto en `docs/`, muévelo a `messages/open/` con el frontmatter.
+
+### 18.2 Estado de pendientes: `docs/PENDIENTES.md`
+
+Single source of truth de TODO el trabajo pendiente del sistema. Reemplaza
+los `[TODO v1.X.X]` en código, los TODOs en mensajes y los items dispersos
+en roadmap. Estructura mínima:
+
+```markdown
+# Pendientes activos
+
+## Backend
+- [ ] **be-1**: migración 020 — extender trigger Y. Owner: backend. Prio: alta. ETA: v1.5.0.
+- [ ] **be-2**: endpoint /v1/reportes/X. Owner: backend. Prio: media. Blocked-by: be-1.
+
+## Frontend
+- [ ] **fe-1**: pantalla /admin/reportes. Owner: frontend. Prio: alta. Blocked-by: be-2.
+
+## Infra
+- [ ] **infra-1**: rotación de claves JWT. Owner: infra. Prio: baja.
+
+# Pendientes diferidos (roadmap futuro)
+- [ ] Calculadora ERRORES_5XX. Requiere Nivel 9.
+```
+
+- IDs estables (`be-1`, `fe-1`...) — referenciables desde commits y mensajes.
+- Cualquier commit que cierra un item debe agregar `Closes be-N` al footer.
+- Cualquier item nuevo se agrega aquí ANTES de empezar el trabajo.
+
+### 18.3 Antes de empezar trabajo (cada agente)
+
+```
+□ git fetch origin main && git pull
+□ Leer docs/messages/open/ — filtrar por `to: <mi-agente>` o `to: all`
+□ Leer docs/PENDIENTES.md — confirmar IDs de los items que vas a tocar
+□ git log --oneline main..origin/main  ← ¿hay commits que aún no integraste?
+□ Decidir branch: feat/be-* | feat/fe-* | fix/be-* (ver §13.3a)
+□ Anunciar inicio en docs/messages/open/ si vas a tocar algo crítico
+  (migraciones de schema, contratos de API, build pipeline)
+```
+
+### 18.4 Antes de commitear (cada agente)
+
+```
+□ git status — verificar que NO tienes:
+    - migrations/*.sql untracked + src/** modificado simultáneamente
+      (el pre-commit hook orphan-migration-check bloquea esto)
+    - cambios a archivos del OTRO agente sin previo aviso vía mensaje
+□ npm test (suite completa) verde
+□ npm run migrate desde fresh DB verde
+□ Si cierras pendientes: `Closes be-N` en el commit message footer
+□ Commit message en formato conventional commits:
+    feat(be): ...    fix(fe): ...    chore(infra): ...    docs: ...
+```
+
+### 18.5 Antes de mergear PR (cada agente)
+
+```
+□ CI todos verde (backend + frontend + e2e + migrations-clean-apply)
+□ Sub-agente reviewer correspondiente revisó el diff (be-reviewer | ui-reviewer)
+□ Si tu PR cierra un mensaje del otro agente → responder en docs/messages/
+  ANTES de mergear, no después
+□ Actualizar docs/PENDIENTES.md marcando items cerrados
+□ Tag SemVer si aplica (cambios mayores: minor; bugfixes: patch)
+```
+
+### 18.6 Comportamiento prohibido
+
+```
+✗ Push directo a main (branch protection lo bloquea)
+✗ Force-push de rama activa del otro agente
+✗ Mergear un PR sin leer mensajes nuevos en docs/messages/open/
+✗ Cerrar pendientes (PENDIENTES.md) sin tener PR mergeado que los cierra
+✗ Enviar mensaje al otro agente fuera de docs/messages/
+✗ Mergear con CI rojo en algún job (incluso si "el job rojo no es de mi área")
+✗ Rebase de ramas con commits del otro agente (genera conflictos invisibles)
+✗ Commit con migración untracked + service modificado (regresión silenciosa)
+```
+
+### 18.7 Sub-agentes que apoyan este protocolo
+
+- `message-bus` (.claude/agents/message-bus.md) — destila docs/messages/open/
+  a tabla resumen con `to: <yo>` filtrado. Llamar al iniciar sesión.
+- `be-reviewer` (.claude/agents/be-reviewer.md) — revisa diff backend pre-PR.
+- `ui-reviewer` (.claude/agents/ui-reviewer.md) — revisa diff frontend pre-PR.
+- `audit-pendientes` (.claude/skills/audit-pendientes) — verifica que items
+  marcados como cerrados en PENDIENTES.md tienen commits que los cierran.
+
+---
+
+*CLAUDE.md v3.1 — Método Completo de Desarrollo de Sistemas*
 *17 modos · 5 fases · 9 niveles de metadata · 4 versiones del sistema*
+*+ Convivencia multi-agente · DoD backend · Tests order-independent*
 *Citación APA 7ª edición · Mayo 2026*
