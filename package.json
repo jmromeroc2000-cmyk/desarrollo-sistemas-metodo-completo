@@ -1,0 +1,15 @@
+{
+  "name": "metodo-desarrollo-sistemas",
+  "version": "2.0.0",
+  "description": "Método de desarrollo de sistemas dirigido por metadata, con convivencia multi-agente.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "validate:messages": "node scripts/message-bus-validate.js --strict"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jmromeroc2000-cmyk/desarrollo-sistemas-metodo-completo"
+  }
+}

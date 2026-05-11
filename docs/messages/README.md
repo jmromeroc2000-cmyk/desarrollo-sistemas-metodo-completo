@@ -160,9 +160,26 @@ El sub-agente devuelve tabla priorizada filtrada por `to: <mi-agente>` o
 `message-bus --strict` (invocado en CI o manualmente) valida:
 
 - Todo archivo en `open/`/`archived/` tiene frontmatter válido.
-- `in_reply_to` apunta a archivo existente.
-- `closes` apunta a archivos existentes.
+- `in_reply_to` apunta a archivo existente **en este repo**.
+- `closes` apunta a archivos existentes **en este repo**.
 - Threads `closed` están realmente en `archived/`.
 - No hay archivos en `archived/` que aún tengan respuestas pendientes.
 
 Exit code 1 si hay cualquier anomalía.
+
+### Cross-repo references
+
+Si dos agentes trabajan en repos distintos (ej: el método base vs un
+sistema construido con el método), los `in_reply_to`/`closes` pueden
+apuntar a archivos del OTRO repo. El validador local marca como
+anomalía porque no encuentra el archivo localmente, pero es esperado.
+
+**Recomendaciones**:
+
+- Para casos cross-repo: usar prefix `external:` en el valor para
+  documentar que es referencia cross-repo (parser ignora):
+  ```yaml
+  closes: ['external:sistema-inventarios#docs/messages/...md']
+  ```
+- O en repos nuevos sin historial cross-repo, mantener `closes:` siempre
+  local — el validador `--strict` pasa limpio.

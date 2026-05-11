@@ -2892,76 +2892,88 @@ ALTA/MEDIA/BAJA con archivo:línea para cada hallazgo.
 > que pasó CI por casualidad. Estos 3 escenarios están bloqueados por
 > el protocolo siguiente.
 
-### 18.1 Canal de mensajes: `docs/messages/`
+### 18.1 Canal de mensajes: `docs/messages/` (APPEND-ONLY v2.0.0)
 
 ```
 docs/messages/
 ├── README.md          ← frontmatter schema + ejemplos
-├── open/              ← mensajes activos (sin respuesta o sin cerrar)
-│   └── YYYY-MM-DD-HHmm-from-X-to-Y-tema.md
-└── archived/          ← respondidos/cerrados (conservados por trazabilidad)
-    └── YYYY-MM-DD-HHmm-from-X-to-Y-tema.md
+├── open/              ← mensajes activos (thread sin cerrar)
+└── archived/          ← threads cerrados (conservados por trazabilidad)
 ```
 
-Cada mensaje empieza con frontmatter YAML:
+**Principio fundamental:** los mensajes son **inmutables después de creados**.
+El estado del thread se **deriva** de la existencia de respuestas, no de un
+campo mutable. Esto elimina merge conflicts cuando dos agentes responden
+en paralelo.
+
+Frontmatter del mensaje **original** (sin `in_reply_to`):
 
 ```yaml
 ---
-from:    backend           # o frontend, infra
-to:      frontend           # o backend, infra, all
+from:    backend           # backend | frontend | infra
+to:      frontend           # backend | frontend | infra | all
 created: 2026-05-10T22:00:00-06:00
-subject: Pendientes detectados post v1.4.8
-closes:  []                 # IDs/files de mensajes que esta cierra
-state:   open               # open | responded | closed
+subject: <asunto>
 labels:  [migration, blocker]
 ---
 ```
 
-**Reglas:**
+Frontmatter de una **respuesta**:
 
-- Al ENVIAR: crear archivo en `open/` con frontmatter.
-- Al RESPONDER: actualizar `state: responded` + crear nuevo mensaje (también en `open/`)
-  con `closes: [archivo-anterior.md]`.
-- Al CERRAR (acción completada): mover el thread completo a `archived/`,
-  `state: closed`.
-- Al ABRIR sesión: cada agente DEBE leer `docs/messages/open/` antes de
-  empezar trabajo (filtrar por `to: <mi-agente>` o `to: all`).
-- Prohibido: mensajes inter-agente fuera de `docs/messages/`. Si encuentras
-  un mensaje suelto en `docs/`, muévelo a `messages/open/` con el frontmatter.
-
-### 18.2 Estado de pendientes: `docs/PENDIENTES.md`
-
-Single source of truth de TODO el trabajo pendiente del sistema. Reemplaza
-los `[TODO v1.X.X]` en código, los TODOs en mensajes y los items dispersos
-en roadmap. Estructura mínima:
-
-```markdown
-# Pendientes activos
-
-## Backend
-- [ ] **be-1**: migración 020 — extender trigger Y. Owner: backend. Prio: alta. ETA: v1.5.0.
-- [ ] **be-2**: endpoint /v1/reportes/X. Owner: backend. Prio: media. Blocked-by: be-1.
-
-## Frontend
-- [ ] **fe-1**: pantalla /admin/reportes. Owner: frontend. Prio: alta. Blocked-by: be-2.
-
-## Infra
-- [ ] **infra-1**: rotación de claves JWT. Owner: infra. Prio: baja.
-
-# Pendientes diferidos (roadmap futuro)
-- [ ] Calculadora ERRORES_5XX. Requiere Nivel 9.
+```yaml
+---
+from:        frontend
+to:          backend
+created:     2026-05-10T23:00:00-06:00
+subject:     Re: <asunto>
+in_reply_to: 2026-05-10-2200-from-backend-to-frontend-X.md
+closes:      []                       # llena cuando este mensaje cierra el thread
+labels:      [...]
+---
 ```
 
-- IDs estables (`be-1`, `fe-1`...) — referenciables desde commits y mensajes.
-- Cualquier commit que cierra un item debe agregar `Closes be-N` al footer.
-- Cualquier item nuevo se agrega aquí ANTES de empezar el trabajo.
+**Estado derivado** (calculado por `message-bus`, no se escribe):
+
+```
+sin respuestas              → 'open'
+≥1 respuesta sin `closes:`  → 'replied'
+respuesta con `closes:`     → 'closed' → mover thread a archived/
+```
+
+**Reglas:**
+
+- Mensajes son APPEND-ONLY: NO se edita ningún archivo después de creado.
+- Al RESPONDER: crear NUEVO archivo con `in_reply_to: <archivo-origen>`.
+- Al CERRAR thread: nuevo mensaje con `closes: [archivos del thread]` +
+  mover todos los archivos del thread a `archived/`.
+- Al ABRIR sesión: cada agente lee `docs/messages/open/` filtrado por
+  `to: <mi-agente>` o `to: all` (sub-agente `message-bus` lo destila).
+- Validación: `node scripts/message-bus-validate.js --strict` corre en CI.
+
+### 18.1a Pendientes por scope: `docs/pendientes/<scope>.md`
+
+Single source of truth dividido en 4 archivos:
+
+```
+docs/pendientes/
+├── backend.md    ← solo backend agent edita
+├── frontend.md   ← solo frontend agent edita
+├── infra.md      ← infra/DevOps
+└── roadmap.md    ← items diferidos
+```
+
+IDs `<scope>-<n>` por scope (be-1, fe-1, infra-1) — secuenciales, no reciclables.
+Cero merge conflicts entre agentes (solo el owner toca su archivo).
 
 ### 18.3 Antes de empezar trabajo (cada agente)
 
 ```
+□ node .claude/apply-agent-identity.js <backend|frontend|infra>
+  (configura git user.email local para tu agente)
 □ git fetch origin main && git pull
-□ Leer docs/messages/open/ — filtrar por `to: <mi-agente>` o `to: all`
-□ Leer docs/PENDIENTES.md — confirmar IDs de los items que vas a tocar
+□ Invocar sub-agente `message-bus` (o leer docs/messages/open/ manualmente)
+  filtrar por `to: <mi-agente>` o `to: all`
+□ Leer docs/pendientes/<mi-scope>.md — confirmar IDs activos
 □ git log --oneline main..origin/main  ← ¿hay commits que aún no integraste?
 □ Decidir branch: feat/be-* | feat/fe-* | fix/be-* (ver §13.3a)
 □ Anunciar inicio en docs/messages/open/ si vas a tocar algo crítico
@@ -2976,21 +2988,26 @@ en roadmap. Estructura mínima:
       (el pre-commit hook orphan-migration-check bloquea esto)
     - cambios a archivos del OTRO agente sin previo aviso vía mensaje
 □ npm test (suite completa) verde
-□ npm run migrate desde fresh DB verde
+□ npm run migrate desde fresh DB verde (incluye .down.sql validation)
+□ Si tocas metadata (Dev/frontend/tokens/metadata-snapshot.json o
+  campos_sistema): regenerar TS types + MSW handlers
+    cd Dev/frontend && npm run meta:snapshot && npm run meta:types && npm run msw:gen
 □ Si cierras pendientes: `Closes be-N` en el commit message footer
 □ Commit message en formato conventional commits:
     feat(be): ...    fix(fe): ...    chore(infra): ...    docs: ...
+□ Authored-Agent: <yo>  trailer en el commit message
 ```
 
 ### 18.5 Antes de mergear PR (cada agente)
 
 ```
-□ CI todos verde (backend + frontend + e2e + migrations-clean-apply)
+□ CI todos verde (backend, frontend, e2e matrix, migrations-clean-apply,
+  migrations-down-syntax, metadata-snapshot-sync, a11y)
 □ Sub-agente reviewer correspondiente revisó el diff (be-reviewer | ui-reviewer)
 □ Si tu PR cierra un mensaje del otro agente → responder en docs/messages/
-  ANTES de mergear, no después
-□ Actualizar docs/PENDIENTES.md marcando items cerrados
-□ Tag SemVer si aplica (cambios mayores: minor; bugfixes: patch)
+  con `closes:` ANTES de mergear, no después
+□ Actualizar docs/pendientes/<scope>.md marcando items cerrados
+□ Tag SemVer manual o release-please auto-genera el PR de release
 ```
 
 ### 18.6 Comportamiento prohibido
@@ -3006,18 +3023,29 @@ en roadmap. Estructura mínima:
 ✗ Commit con migración untracked + service modificado (regresión silenciosa)
 ```
 
-### 18.7 Sub-agentes que apoyan este protocolo
+### 18.7 Sub-agentes y skills que apoyan este protocolo
 
 - `message-bus` (.claude/agents/message-bus.md) — destila docs/messages/open/
-  a tabla resumen con `to: <yo>` filtrado. Llamar al iniciar sesión.
+  con estado derivado y prioridad.
 - `be-reviewer` (.claude/agents/be-reviewer.md) — revisa diff backend pre-PR.
 - `ui-reviewer` (.claude/agents/ui-reviewer.md) — revisa diff frontend pre-PR.
-- `audit-pendientes` (.claude/skills/audit-pendientes) — verifica que items
-  marcados como cerrados en PENDIENTES.md tienen commits que los cierran.
+- `/handoff <agente>` (.claude/skills/handoff/) — mensaje fin de turno con
+  contexto preciso (commits, archivos, items dejados).
+- `/inbox` (.claude/skills/inbox/) — re-check de mensajes nuevos en sesión
+  larga.
+- `/status` (.claude/skills/status/) — vista única del proyecto (PRs, mensajes,
+  pendientes, CI).
+- `/health-method` (.claude/skills/health-method/) — verifica que el método
+  está correctamente aplicado.
+- `/audit-pendientes` (.claude/skills/audit-pendientes/) — verifica que items
+  cerrados tienen commits que los cierran.
+- `node scripts/message-bus-validate.js --strict` — valida estructura del
+  protocolo en CI.
 
 ---
 
-*CLAUDE.md v3.1 — Método Completo de Desarrollo de Sistemas*
+*CLAUDE.md v3.2 — Método Completo de Desarrollo de Sistemas*
 *17 modos · 5 fases · 9 niveles de metadata · 4 versiones del sistema*
-*+ Convivencia multi-agente · DoD backend · Tests order-independent*
+*+ Convivencia multi-agente APPEND-ONLY · Backend DoD §F contratos canónicos*
+*+ Codegen TS+MSW+OpenAPI funcional · CI multi-browser + paths-filter*
 *Citación APA 7ª edición · Mayo 2026*
