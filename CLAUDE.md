@@ -725,12 +725,159 @@ producción rota.
 ✗ Mergear sin leer último mensaje del otro agente en docs/messages/open/
 ```
 
+#### F) Contratos canónicos del API (v2.0.0)
+
+> Codified después de SistemaINV — confundimos shapes 3-4 veces. Estas
+> reglas son **contrato firme**, no convención negociable.
+
+##### F.1 Matriz canónica de códigos HTTP
+
+| Código | Cuándo se usa | Body |
+|--------|---------------|------|
+| **200** | OK con recurso o lista | `{ data: ... }` |
+| **201** | Created — devuelve el recurso creado | `{ data: <recurso> }` |
+| **204** | No content — DELETE o ack | (vacío) |
+| **400** | Body mal formado (JSON inválido, falta campo obligatorio) | Problem+JSON |
+| **401** | No autenticado / token inválido / expirado | Problem+JSON con `type: token-expired\|token-invalid\|auth-required` |
+| **403** | Autenticado pero rol no autoriza el recurso | Problem+JSON con `type: forbidden\|role-insufficient` |
+| **404** | Recurso no existe | Problem+JSON con `type: not-found` |
+| **409** | Conflicto de estado (state machine violation, duplicate key, optimistic-concurrency mismatch, protected-resource) | Problem+JSON con `type: conflict-*` específico |
+| **422** | Payload sintácticamente válido pero falla validación de negocio (rango, regex, enum) | Problem+JSON con `type: validation-failed`, body incluye `errors: [...]` |
+| **423** | Locked por semáforo de gating | Problem+JSON con `type: locked-by-semaphore`, `semaphore: <codigo>` |
+| **503** | maintenanceGuard activo | Problem+JSON + header `Retry-After: <seconds>` |
+
+PROHIBIDO:
+- 200 con `error` en el body. Si hay error, status 4xx/5xx.
+- 500 para condiciones esperadas (ej: trigger BD que lanza excepción
+  conocida → capturar y mapear a 409).
+- 401 vs 403 confundidos. 401 = no sé quién eres. 403 = sé quién eres pero no puedes.
+
+##### F.2 Problem+JSON (RFC 9457)
+
+Todo error 4xx/5xx devuelve este shape:
+
+```json
+{
+  "type":     "https://<dominio>/errors/<categoría>",
+  "title":    "<≤120 chars summary, fijo por type>",
+  "status":   <int igual al HTTP status>,
+  "detail":   "<≤500 chars descripción accionable para el usuario>",
+  "instance": "/v1/<path-de-la-request>",
+  "correlation_id": "<uuid>"
+}
+```
+
+REGLAS:
+- `title` Y `detail` deben estar poblados, no vacíos. Test del endpoint
+  debe assert ambos.
+- `type` URI es **contrato estable**. Renombrar requiere bump MAJOR de API.
+- Cambios solo aditivos (campos nuevos OK, eliminar campo es breaking).
+- `extra` extensions (ej: `semaphore`, `errors: [...]`) son aditivas;
+  documentar en §5.1.2.F donde se usan.
+
+##### F.3 Envelope de respuestas
+
+```json
+// Listas paginadas:
+{
+  "data":        [...],
+  "next_cursor": "opaco-base64-o-null"
+}
+
+// Listas no paginadas:
+{ "data": [...] }
+
+// Recurso único:
+{ "data": <recurso> }
+
+// 204:
+(body vacío)
+```
+
+NUNCA:
+- `{ items: [...] }` o `{ rows: [...] }` o variantes — siempre `data`.
+- `{ data, pagination: { next_cursor } }` anidado — plano.
+- `data` ausente cuando hay payload de éxito.
+
+##### F.4 Serialización de tipos
+
+| Tipo BD | Shape JSON | Notas |
+|---------|------------|-------|
+| `TIMESTAMP` / `TIMESTAMPTZ` | ISO 8601 string `"2026-05-11T10:00:00.000Z"` | `JSON.stringify(date)` lo hace automático. Tests reciben string, no Date. |
+| `DATE` | ISO date string `"2026-05-11"` | Sin hora. |
+| `BOOLEANO_01` (smallint 0/1) | `0 \| 1` (number) | Decisión histórica. NO se serializa como `true/false`. |
+| `INTEGER` / `BIGINT` | number | Para BIGINT > 2^53, devolver string + flag explícito. |
+| `DECIMAL` / `NUMERIC` | number | Cuidado con precisión; documentar si requiere `string`. |
+| `UUID` / `CHAR(36)` | string | siempre. |
+| `JSON` / `JSONB` | objeto/array | parseado, no string. |
+| `NULL` | `null` | NO omitir el campo. Si la columna existe en el SELECT, el campo aparece en JSON. |
+
+REGLAS:
+- Test que compara timestamps lo hace como **strings**, no como `Date`.
+  Evita el bug pg-μs vs JS-ms (ver `memory/pg-timestamp-precision.md`).
+- Booleanos siempre `0|1` numérico — no se mezcla con `true/false` en
+  ningún endpoint del mismo proyecto.
+- Campos `null` se incluyen explícitos en respuesta. Frontend distingue
+  "campo presente pero null" de "campo ausente".
+
+##### F.5 Idempotencia uniforme
+
+Operaciones que el frontend puede reintentar (doble-click, red intermitente):
+
+```js
+// Cancelar OC que ya está CANCELADA:
+PATCH /v1/ordenes-compra/:id/cancelar
+// → 200 con el recurso actual
+{
+  "data": <recurso>,
+  "sin_cambio": true   // ← bandera opcional indicando que no hubo cambio real
+}
+```
+
+REGLAS:
+- 200 si el estado actual ya es el deseado (no 409).
+- Body incluye `sin_cambio: true` + el `data` completo.
+- 409 SE RESERVA para "estado actual no permite transición a deseado"
+  (ej: cancelar una OC COMPLETADA).
+- Para `PATCH` con body parcial igual al actual: 200 + `sin_cambio: true`,
+  no escribir historia/audit.
+
+##### F.6 Versionado del API
+
+Todo endpoint vive en `/v<N>/...` desde día 1. La política:
+
+```
+ADITIVOS (NO requieren bump):
+  - Campos nuevos en response
+  - Endpoints nuevos
+  - Query params opcionales nuevos
+  - Headers de response nuevos
+  - Valores nuevos en enum de response (los clientes deben tolerar enums abiertos)
+
+BREAKING (requieren bump /v2):
+  - Cambio de tipo de campo (string→number)
+  - Eliminación de campo
+  - Rename de campo (eliminar + agregar)
+  - Cambio de status code para misma condición
+  - Removal de endpoint
+  - Cambio de shape de paginación o de error
+  - Cambio de identidad del `type:` URI de Problem+JSON
+
+PROCEDIMIENTO de bump:
+  1. /v2 vive en paralelo con /v1 por mínimo 90 días.
+  2. /v1 sirve respuestas con header `Deprecation: true` + `Sunset: <RFC9745 date>`.
+  3. Sunset programado en CHANGELOG con fecha exacta.
+  4. Backend agent NO puede hacer breaking sin RFC previo aprobado en docs/messages/.
+```
+
 #### Tooling enforce de esta sección
 
 - `.husky/pre-commit` — corre `scripts/orphan-migration-check.sh`
-- `.github/workflows/ci.yml` job `migrations-clean-apply` — fresh DB + migrate
-- Sub-agente `be-reviewer` (en `.claude/agents/`) — revisión semántica del diff
-- Skill `/be` (en `.claude/skills/be/`) — modo disciplinado obligatorio
+- `.github/workflows/ci.yml` job `migrations-clean-apply` — fresh DB + migrate (up)
+- `.github/workflows/ci.yml` job `migrations-down-syntax` — cada .up tiene .down y parsea
+- `.github/workflows/ci.yml` job `metadata-snapshot-sync` — back/front en sync
+- Sub-agente `be-reviewer` — revisión semántica del diff
+- Skill `/be` — modo disciplinado obligatorio
 
 ---
 
@@ -2023,6 +2170,236 @@ Sin estas reglas, dos agentes pueden pushear directo a main y romperse
 mutuamente (caso real: v1.4.8 → v1.4.9, un agente rompió main que el
 otro debía consumir).
 
+### 13.3b Secrets management (v2.0.0)
+
+> El método NO opta por uno. Ofrece 3 modos con criterios de selección.
+> `/stack-pick` pregunta cuál y siembra el componente correspondiente.
+
+```yaml
+MODOS DISPONIBLES:
+  dotenv-server:         Archivo .env en filesystem
+    componente:          componentes_sistema (codigo='secrets-dotenv', nivel=2)
+    archivo:             .env (en .gitignore) + .env.example (versionado)
+    permisos:            chmod 0600 propietario del proceso
+    rotación:            manual (cambiar .env + restart)
+    apropiado para:      dev local, sistemas on-prem single-VPS, prototipos
+    inapropiado para:    producción cloud, secrets compartidos entre servicios
+                         multi-instancia
+
+  aws-secrets-manager:   AWS Secrets Manager
+    componente:          codigo='secrets-aws-sm', nivel=2
+    autenticación:       IAM role del EC2/ECS/Lambda (no api keys)
+    rotación:            automática vía AWS SDK
+    apropiado para:      producción AWS, single-cloud
+    inapropiado para:    on-prem, multi-cloud sin AWS
+
+  hashicorp-vault:       HashiCorp Vault
+    componente:          codigo='secrets-vault', nivel=2
+    autenticación:       Kubernetes ServiceAccount / AppRole / cert
+    rotación:            dynamic secrets (BD credentials que vencen)
+    apropiado para:      multi-cloud, on-prem enterprise, secrets compartidos
+                         entre múltiples servicios con renew automático
+    inapropiado para:    sistemas pequeños (overhead de Vault server)
+
+PROHIBIDO en TODOS los modos:
+  ✗ Secrets en repo (git)
+  ✗ Secrets en variables de entorno de CI no encriptadas
+  ✗ Secrets en logs (logger debe redactar — ver templates/backend/logger.js
+    LOG_REDACT_FIELDS env var configura campos adicionales)
+  ✗ Secrets en imágenes Docker (usar Docker secrets o env vars dinámicas)
+
+CONVENCIÓN cross-modos:
+  - Las claves de secrets usan UPPER_SNAKE_CASE (DB_PASSWORD, JWT_PRIVATE_KEY)
+  - Cargados al inicio del proceso, no en cada request
+  - Validación de presencia en startup: si falta uno crítico, FAIL FAST,
+    no degradación silenciosa
+```
+
+### 13.3c Internacionalización (i18n) y multi-stack (v2.0.0)
+
+> Alcance corto (i18n del frontend actual) + visión declarada (multi-stack)
+> + capacidades preparadas para non-Latín scripts.
+
+#### Alcance corto — i18n del frontend (entra a v2.0.0)
+
+```yaml
+locale_base:    es-MX
+framework:      i18next con backend-loader
+encoding:       UTF-8 en TODOS los layers
+                - BD: ENCODING UTF8, COLLATE 'und-x-icu' (PostgreSQL)
+                - HTTP: Content-Type incluye charset=utf-8
+                - Source files: UTF-8 sin BOM
+
+estructura_locales:
+  Dev/frontend/src/locales/
+  ├── es-MX/
+  │   ├── common.json          # navegación, labels comunes
+  │   ├── domain.json          # generado desde campos_sistema.nombre_corto
+  │   └── messages.json        # mensajes derivados de campos_sistema.mensaje_ayuda
+  └── (en-US/, pt-BR/, ... si se activan)
+
+generación:
+  npm run i18n:extract         # script meta-derive-i18n.js corre desde metadata
+                               # Cuando se agregan locales nuevos, traducción
+                               # manual por traductor humano (NO agente).
+
+política:
+  - Toda label/tooltip user-facing usa i18next t() — no strings inline
+  - Plurales con i18next plural rules
+  - Fechas y números: Intl.DateTimeFormat + Intl.NumberFormat según locale
+  - Moneda: Intl.NumberFormat con currency derivado de MONEDA_OPERATIVA
+```
+
+#### Visión multi-stack (v3.0.0+ — declarada, no implementada todavía)
+
+Hoy el método asume Node + React + Postgres. Roadmap: stack-templates
+intercambiables.
+
+```
+.claude/skills/stack-templates/     ← v3.0.0+
+├── node-express-postgres/   ← actual, "default"
+├── python-fastapi-postgres/ ← futuro
+├── go-chi-postgres/         ← futuro
+└── rust-axum-postgres/      ← futuro
+
+Lo que SE MANTIENE cross-stack (contratos, no implementación):
+  - Convención de metadata (tablas_sistema, campos_sistema, ...)
+  - docs/messages/ + docs/pendientes/ append-only
+  - Migraciones con .up.sql/.down.sql
+  - Problem+JSON RFC 9457
+  - Paginación cursor-based con envelope { data, next_cursor }
+  - Matriz HTTP canónica
+  - Codegen de tipos desde metadata (TS default; otros: Python dataclasses,
+    Go structs, Rust types — skill análoga)
+
+Lo que CAMBIA por stack:
+  - Lenguaje + framework HTTP
+  - ORM o SQL raw
+  - Test runner, linter, formatter, build tool
+```
+
+#### Capacidades para non-Latín scripts (preparadas en v2, activadas según locale)
+
+UTF-8 cubre Latín, Cirílico, Árabe, CJK, Devanagari. Capacidades extra:
+
+```
+BD:
+  COLLATE 'und-x-icu' default v2.0.0     ← sort cultural correcto
+
+Frontend fuentes (tokens/typography.json):
+  Default: Inter (Latín, Cirílico, Griego)
+  Fallback: + Noto Sans CJK + Noto Sans Arabic + system-ui
+
+Frontend layout RTL (Árabe, Hebreo):
+  - @tailwindcss/typography + dir variants
+  - HTML lang + dir attrs según locale
+  - CI a11y matrix incluye dir="rtl" cuando hay locale RTL activo
+
+Validaciones:
+  - PROHIBIDO regex `^[a-zA-Z]+$` en nombres → usar `\p{L}+`
+  - Longitud por caracteres Unicode, no bytes (graphemes para names)
+  - Comparación con Intl.Collator, no ===
+
+Inputs:
+  - IME composition events soportados (CJK)
+  - Auto-capitalize off en idiomas sin mayúscula
+```
+
+ACTIVACIÓN: sistema declara `locale != es-MX` o `script != Latin` en
+`variables_sistema` → CI matrix incluye ese locale automáticamente.
+
+### 13.3d Convención `tabla_uso` en `tablas_sistema` (v2.0.0)
+
+Columna adicional en `tablas_sistema` (declarada en migración bootstrap):
+
+```sql
+ALTER TABLE tablas_sistema
+ADD COLUMN tabla_uso VARCHAR(20) NOT NULL DEFAULT 'crud',
+ADD CONSTRAINT ck_tablas_sistema_uso
+  CHECK (tabla_uso IN ('crud', 'lectura', 'interna', 'reporte'));
+```
+
+Valores:
+
+| `tabla_uso` | Significado | Frontend |
+|-------------|-------------|----------|
+| `crud` | CRUD completo en UI | `<Tabla>List/Form/Detail` generadas por `gen:catalog` |
+| `lectura` | Solo lectura en UI (no editable desde la app) | Lista + detalle, sin formularios |
+| `interna` | Sin UI (uso interno del sistema) | NO se genera UI |
+| `reporte` | Vista derivada para reportes | Visor especial, no formularios |
+
+Ejemplos:
+
+- `usuarios`: `crud` (admin gestiona).
+- `usuarios_roles`: `interna` (manejado vía `/v1/usuarios/:id/roles`, no directo).
+- `movimientos`: `lectura` (se crea por triggers automáticos al confirmar entrada/salida).
+- `audit_log`: `reporte` (vista de auditoría).
+- `_migrations`: `interna` (no se expone, lo maneja el runner).
+
+**Uso por las skills**:
+
+- `front-scaffold-from-meta` lee `tabla_uso`:
+  - `crud` → genera pages completas (lista + form + detalle).
+  - `lectura` → solo lista + detalle (no form).
+  - `interna` → no genera UI.
+  - `reporte` → genera visor read-only con filtros.
+
+- `gen:catalog` (Plop) solo lista tablas con `tabla_uso='crud'` y
+  `generar_ui_crud=1`.
+
+### 13.3e Telemetría client-side y feature flags (v2.0.0)
+
+#### Telemetría client-side (mínimo aceptable)
+
+```yaml
+captura_errores:
+  ventana_target:  errores no-manejados + unhandled promise rejection
+  destino:         Sentry / similar (componente en componentes_sistema)
+  redacción:       email, tokens, PII redactados antes de enviar
+  configurable:    via .env SENTRY_DSN (vacío = telemetría off)
+
+metricas_UX:
+  herramienta:     web-vitals npm package
+  metricas:        TTFB, FCP, LCP, CLS, INP (Core Web Vitals)
+  destino:         endpoint backend /v1/telemetry/web-vitals
+                   tabla: telemetria_web_vitals (nivel 9)
+  sample_rate:     10% en PERFORMANCE, 100% en DEBUG
+
+session_replay:
+  default:         off
+  activar:         decisión per-proyecto (riesgo de leak de PII)
+  herramienta:     rrweb / similar; SOLO con consentimiento del usuario
+                   variable: TELEMETRY_REPLAY_ENABLED
+```
+
+#### Feature flags client-side
+
+Distinto de semáforos (nivel 2 — gobiernan operaciones de negocio).
+Feature flags son **UI/experience-level**:
+
+```yaml
+casos_de_uso:
+  - Toggle dark mode default
+  - Hide/show experimental feature
+  - A/B copy de un botón
+  - Rollout gradual de pantalla nueva
+
+mecanismo:
+  opción_A (interno):  tabla feature_flags en BD (nivel 2 extendido)
+                       endpoint GET /v1/feature-flags
+                       frontend cachea con TanStack Query (stale 5min)
+
+  opción_B (externo):  LaunchDarkly / GrowthBook / Statsig
+                       requiere componente en componentes_sistema
+
+decisión:           /stack-pick pregunta cuál (default: opción A)
+
+reglas:
+  - Flags por usuario o por rol (no globales)
+  - Default deshabilitado (fail safe)
+  - Limpiar flags inactivos cada release (no acumular debt)
+```
+
 ### 13.4 Roles del sistema (fijos)
 
 Cada proyecto debe sembrar EXACTAMENTE estos 5 roles con los UUIDs reservados:
@@ -2515,76 +2892,88 @@ ALTA/MEDIA/BAJA con archivo:línea para cada hallazgo.
 > que pasó CI por casualidad. Estos 3 escenarios están bloqueados por
 > el protocolo siguiente.
 
-### 18.1 Canal de mensajes: `docs/messages/`
+### 18.1 Canal de mensajes: `docs/messages/` (APPEND-ONLY v2.0.0)
 
 ```
 docs/messages/
 ├── README.md          ← frontmatter schema + ejemplos
-├── open/              ← mensajes activos (sin respuesta o sin cerrar)
-│   └── YYYY-MM-DD-HHmm-from-X-to-Y-tema.md
-└── archived/          ← respondidos/cerrados (conservados por trazabilidad)
-    └── YYYY-MM-DD-HHmm-from-X-to-Y-tema.md
+├── open/              ← mensajes activos (thread sin cerrar)
+└── archived/          ← threads cerrados (conservados por trazabilidad)
 ```
 
-Cada mensaje empieza con frontmatter YAML:
+**Principio fundamental:** los mensajes son **inmutables después de creados**.
+El estado del thread se **deriva** de la existencia de respuestas, no de un
+campo mutable. Esto elimina merge conflicts cuando dos agentes responden
+en paralelo.
+
+Frontmatter del mensaje **original** (sin `in_reply_to`):
 
 ```yaml
 ---
-from:    backend           # o frontend, infra
-to:      frontend           # o backend, infra, all
+from:    backend           # backend | frontend | infra
+to:      frontend           # backend | frontend | infra | all
 created: 2026-05-10T22:00:00-06:00
-subject: Pendientes detectados post v1.4.8
-closes:  []                 # IDs/files de mensajes que esta cierra
-state:   open               # open | responded | closed
+subject: <asunto>
 labels:  [migration, blocker]
 ---
 ```
 
-**Reglas:**
+Frontmatter de una **respuesta**:
 
-- Al ENVIAR: crear archivo en `open/` con frontmatter.
-- Al RESPONDER: actualizar `state: responded` + crear nuevo mensaje (también en `open/`)
-  con `closes: [archivo-anterior.md]`.
-- Al CERRAR (acción completada): mover el thread completo a `archived/`,
-  `state: closed`.
-- Al ABRIR sesión: cada agente DEBE leer `docs/messages/open/` antes de
-  empezar trabajo (filtrar por `to: <mi-agente>` o `to: all`).
-- Prohibido: mensajes inter-agente fuera de `docs/messages/`. Si encuentras
-  un mensaje suelto en `docs/`, muévelo a `messages/open/` con el frontmatter.
-
-### 18.2 Estado de pendientes: `docs/PENDIENTES.md`
-
-Single source of truth de TODO el trabajo pendiente del sistema. Reemplaza
-los `[TODO v1.X.X]` en código, los TODOs en mensajes y los items dispersos
-en roadmap. Estructura mínima:
-
-```markdown
-# Pendientes activos
-
-## Backend
-- [ ] **be-1**: migración 020 — extender trigger Y. Owner: backend. Prio: alta. ETA: v1.5.0.
-- [ ] **be-2**: endpoint /v1/reportes/X. Owner: backend. Prio: media. Blocked-by: be-1.
-
-## Frontend
-- [ ] **fe-1**: pantalla /admin/reportes. Owner: frontend. Prio: alta. Blocked-by: be-2.
-
-## Infra
-- [ ] **infra-1**: rotación de claves JWT. Owner: infra. Prio: baja.
-
-# Pendientes diferidos (roadmap futuro)
-- [ ] Calculadora ERRORES_5XX. Requiere Nivel 9.
+```yaml
+---
+from:        frontend
+to:          backend
+created:     2026-05-10T23:00:00-06:00
+subject:     Re: <asunto>
+in_reply_to: 2026-05-10-2200-from-backend-to-frontend-X.md
+closes:      []                       # llena cuando este mensaje cierra el thread
+labels:      [...]
+---
 ```
 
-- IDs estables (`be-1`, `fe-1`...) — referenciables desde commits y mensajes.
-- Cualquier commit que cierra un item debe agregar `Closes be-N` al footer.
-- Cualquier item nuevo se agrega aquí ANTES de empezar el trabajo.
+**Estado derivado** (calculado por `message-bus`, no se escribe):
+
+```
+sin respuestas              → 'open'
+≥1 respuesta sin `closes:`  → 'replied'
+respuesta con `closes:`     → 'closed' → mover thread a archived/
+```
+
+**Reglas:**
+
+- Mensajes son APPEND-ONLY: NO se edita ningún archivo después de creado.
+- Al RESPONDER: crear NUEVO archivo con `in_reply_to: <archivo-origen>`.
+- Al CERRAR thread: nuevo mensaje con `closes: [archivos del thread]` +
+  mover todos los archivos del thread a `archived/`.
+- Al ABRIR sesión: cada agente lee `docs/messages/open/` filtrado por
+  `to: <mi-agente>` o `to: all` (sub-agente `message-bus` lo destila).
+- Validación: `node scripts/message-bus-validate.js --strict` corre en CI.
+
+### 18.1a Pendientes por scope: `docs/pendientes/<scope>.md`
+
+Single source of truth dividido en 4 archivos:
+
+```
+docs/pendientes/
+├── backend.md    ← solo backend agent edita
+├── frontend.md   ← solo frontend agent edita
+├── infra.md      ← infra/DevOps
+└── roadmap.md    ← items diferidos
+```
+
+IDs `<scope>-<n>` por scope (be-1, fe-1, infra-1) — secuenciales, no reciclables.
+Cero merge conflicts entre agentes (solo el owner toca su archivo).
 
 ### 18.3 Antes de empezar trabajo (cada agente)
 
 ```
+□ node .claude/apply-agent-identity.js <backend|frontend|infra>
+  (configura git user.email local para tu agente)
 □ git fetch origin main && git pull
-□ Leer docs/messages/open/ — filtrar por `to: <mi-agente>` o `to: all`
-□ Leer docs/PENDIENTES.md — confirmar IDs de los items que vas a tocar
+□ Invocar sub-agente `message-bus` (o leer docs/messages/open/ manualmente)
+  filtrar por `to: <mi-agente>` o `to: all`
+□ Leer docs/pendientes/<mi-scope>.md — confirmar IDs activos
 □ git log --oneline main..origin/main  ← ¿hay commits que aún no integraste?
 □ Decidir branch: feat/be-* | feat/fe-* | fix/be-* (ver §13.3a)
 □ Anunciar inicio en docs/messages/open/ si vas a tocar algo crítico
@@ -2599,21 +2988,26 @@ en roadmap. Estructura mínima:
       (el pre-commit hook orphan-migration-check bloquea esto)
     - cambios a archivos del OTRO agente sin previo aviso vía mensaje
 □ npm test (suite completa) verde
-□ npm run migrate desde fresh DB verde
+□ npm run migrate desde fresh DB verde (incluye .down.sql validation)
+□ Si tocas metadata (Dev/frontend/tokens/metadata-snapshot.json o
+  campos_sistema): regenerar TS types + MSW handlers
+    cd Dev/frontend && npm run meta:snapshot && npm run meta:types && npm run msw:gen
 □ Si cierras pendientes: `Closes be-N` en el commit message footer
 □ Commit message en formato conventional commits:
     feat(be): ...    fix(fe): ...    chore(infra): ...    docs: ...
+□ Authored-Agent: <yo>  trailer en el commit message
 ```
 
 ### 18.5 Antes de mergear PR (cada agente)
 
 ```
-□ CI todos verde (backend + frontend + e2e + migrations-clean-apply)
+□ CI todos verde (backend, frontend, e2e matrix, migrations-clean-apply,
+  migrations-down-syntax, metadata-snapshot-sync, a11y)
 □ Sub-agente reviewer correspondiente revisó el diff (be-reviewer | ui-reviewer)
 □ Si tu PR cierra un mensaje del otro agente → responder en docs/messages/
-  ANTES de mergear, no después
-□ Actualizar docs/PENDIENTES.md marcando items cerrados
-□ Tag SemVer si aplica (cambios mayores: minor; bugfixes: patch)
+  con `closes:` ANTES de mergear, no después
+□ Actualizar docs/pendientes/<scope>.md marcando items cerrados
+□ Tag SemVer manual o release-please auto-genera el PR de release
 ```
 
 ### 18.6 Comportamiento prohibido
@@ -2629,18 +3023,29 @@ en roadmap. Estructura mínima:
 ✗ Commit con migración untracked + service modificado (regresión silenciosa)
 ```
 
-### 18.7 Sub-agentes que apoyan este protocolo
+### 18.7 Sub-agentes y skills que apoyan este protocolo
 
 - `message-bus` (.claude/agents/message-bus.md) — destila docs/messages/open/
-  a tabla resumen con `to: <yo>` filtrado. Llamar al iniciar sesión.
+  con estado derivado y prioridad.
 - `be-reviewer` (.claude/agents/be-reviewer.md) — revisa diff backend pre-PR.
 - `ui-reviewer` (.claude/agents/ui-reviewer.md) — revisa diff frontend pre-PR.
-- `audit-pendientes` (.claude/skills/audit-pendientes) — verifica que items
-  marcados como cerrados en PENDIENTES.md tienen commits que los cierran.
+- `/handoff <agente>` (.claude/skills/handoff/) — mensaje fin de turno con
+  contexto preciso (commits, archivos, items dejados).
+- `/inbox` (.claude/skills/inbox/) — re-check de mensajes nuevos en sesión
+  larga.
+- `/status` (.claude/skills/status/) — vista única del proyecto (PRs, mensajes,
+  pendientes, CI).
+- `/health-method` (.claude/skills/health-method/) — verifica que el método
+  está correctamente aplicado.
+- `/audit-pendientes` (.claude/skills/audit-pendientes/) — verifica que items
+  cerrados tienen commits que los cierran.
+- `node scripts/message-bus-validate.js --strict` — valida estructura del
+  protocolo en CI.
 
 ---
 
-*CLAUDE.md v3.1 — Método Completo de Desarrollo de Sistemas*
+*CLAUDE.md v3.2 — Método Completo de Desarrollo de Sistemas*
 *17 modos · 5 fases · 9 niveles de metadata · 4 versiones del sistema*
-*+ Convivencia multi-agente · DoD backend · Tests order-independent*
+*+ Convivencia multi-agente APPEND-ONLY · Backend DoD §F contratos canónicos*
+*+ Codegen TS+MSW+OpenAPI funcional · CI multi-browser + paths-filter*
 *Citación APA 7ª edición · Mayo 2026*

@@ -1,165 +1,208 @@
 # Desarrollo de Sistemas — Método Completo
 
-[![Release](https://img.shields.io/badge/release-v1.1.0-blue)](https://github.com/jmromeroc2000-cmyk/desarrollo-sistemas-metodo-completo/releases/tag/v1.1.0)
+[![Release](https://img.shields.io/badge/release-v2.0.0-blue)](https://github.com/jmromeroc2000-cmyk/desarrollo-sistemas-metodo-completo/releases/tag/v2.0.0)
 
 Método de creación de sistemas en **5 fases** dirigido por **metadata** y
-preparado para **convivencia multi-agente** (backend y frontend trabajando
-en paralelo).
+preparado para **convivencia multi-agente** (backend, frontend, infra
+trabajando en paralelo).
 
 La metadata se diseña antes de programar y es el contrato que backend y
-frontend leen — nunca duplican. Los agentes se coordinan mediante un canal
-de mensajes versionado en `docs/messages/` y un registro único de
-pendientes en `docs/PENDIENTES.md`.
+frontend leen — nunca duplican. **Los tipos TypeScript del frontend, los
+handlers MSW de tests y el OpenAPI completo se auto-generan desde la
+metadata.** Los agentes se coordinan mediante mensajes append-only en
+`docs/messages/` y un registro único de pendientes por scope en
+`docs/pendientes/`.
 
-> **Última versión:** v1.1.0 (mayo 2026) — añade convivencia multi-agente,
-> Backend DoD, CI con jobs por path-filter, branch protection, sub-agente
-> `be-reviewer` y `message-bus`, skill `/be`, hook `orphan-migration-check`.
+> **Última versión:** v2.0.0 (mayo 2026) — codegen funcional TS+MSW+OpenAPI
+> desde metadata, protocolo de mensajes append-only, multi-browser E2E,
+> rollback up/down de migraciones, contratos canónicos del API (matriz HTTP,
+> Problem+JSON, paginación, Date/ISO, 0|1, idempotencia), secrets management
+> multi-modo, i18n con visión multi-stack, 16 memorias técnicas pre-cargadas.
 
-## ¿Qué hay aquí?
+## Estructura del método
 
 ```
 DesarrolloSistemasMetodoCompleto/
-├── CLAUDE.md                  ← v3.1 — método completo
-│   ├── §5.1.1 UI DoD          ← Definition of Done frontend
-│   ├── §5.1.2 Backend DoD     ← Definition of Done backend (NUEVO v1.1.0)
-│   ├── §5.1.3 Tests DoD       ← order/state-independent (NUEVO v1.1.0)
-│   ├── §13.3   Versionado     ← una sola fuente: git tag + CHANGELOG (NUEVO)
-│   ├── §13.3a  Ramas          ← feat/be-*, feat/fe-*, ... (NUEVO)
-│   ├── §13.3+  Branch protect ← reglas en main (NUEVO)
-│   └── §18     Convivencia    ← protocolo multi-agente (NUEVO)
+├── CLAUDE.md                  ← v3.2 — método completo + 17 modos
+│   ├── §5.1.1 UI DoD          ← Frontend Definition of Done
+│   ├── §5.1.2 Backend DoD     ← incluye §F contratos canónicos del API
+│   ├── §5.1.3 Tests DoD       ← order/state-independent
+│   ├── §13.3*  Versionado + ramas + secrets + i18n + telemetría + tabla_uso
+│   └── §18     Convivencia multi-agente APPEND-ONLY
 ├── README.md
-├── .github/workflows/ci.yml   ← CI con path-filter por job (NUEVO)
-├── .husky/pre-commit          ← compuesto: orphan-check + lint-staged + preflight
+├── package.json + release-please-config.json + .release-please-manifest.json
+├── .github/
+│   ├── workflows/{ci,audit,release-please}.yml
+│   └── pull_request_template.md
+├── .husky/pre-commit          ← orphan-migration-check + lint-staged
 ├── scripts/
-│   └── orphan-migration-check.sh  ← bloquea regresión silenciosa (NUEVO)
+│   ├── orphan-migration-check.sh
+│   └── message-bus-validate.js
 ├── docs/
-│   ├── PENDIENTES.md          ← SSOT del trabajo pendiente (NUEVO)
-│   ├── CHANGELOG.md           ← generado desde conventional commits (NUEVO)
-│   └── messages/
-│       ├── README.md          ← protocolo + frontmatter schema
-│       ├── open/              ← mensajes activos
-│       └── archived/          ← respondidos/cerrados
-├── memory/                     ← gotchas técnicos pre-cargados (NUEVO)
-│   ├── MEMORY.md
-│   └── (7 entradas)
+│   ├── CHANGELOG.md           ← generado por release-please
+│   ├── MCP-recomendados.md
+│   ├── pendientes/{backend,frontend,infra,roadmap}.md  ← SSOT por scope
+│   └── messages/{open,archived}/  ← canal append-only
+├── memory/                     ← 16 entries pre-cargadas
+├── templates/
+│   ├── bootstrap.sh
+│   ├── migrate.js             ← runner up/down/status
+│   ├── migrations/{NNNN.up.sql, NNNN.down.sql}
+│   ├── codegen/               ← FUNCIONALES (no stubs):
+│   │   ├── meta-derive-types.js     ← genera TS interfaces
+│   │   ├── front-msw-from-meta.js   ← genera MSW handlers
+│   │   └── meta-derive-openapi.js   ← genera OpenAPI 3.1
+│   ├── backend/{health.js, logger.js}
+│   └── eslint-rules/local-rules.js
 └── .claude/
-    ├── settings.local.json
-    ├── agents/
-    │   ├── ui-reviewer.md
-    │   ├── be-reviewer.md     ← (NUEVO) revisor backend pre-PR
-    │   └── message-bus.md     ← (NUEVO) destila docs/messages/open/
-    └── skills/
-        ├── README.md
-        ├── ui/SKILL.md
-        ├── be/SKILL.md        ← (NUEVO) modo disciplinado backend
-        └── (resto de skills)
+    ├── agents-config.json + apply-agent-identity.js
+    ├── agents/{ui-reviewer, be-reviewer, message-bus}.md
+    └── skills/ (40+ skills)
 ```
 
 ## Las 5 fases
 
 ```
-FASE 1 — METADATA           /meta   → diseñar tablas, campos, procesos en BD antes de programar
-FASE 2 — ARQUITECTURA       /arq    → derivar capas y decisiones desde la metadata
-FASE 3 — STACK              /dev    → declarar componentes_sistema con versiones
-FASE 4 — INSTALACIÓN        /dev    → bootstrap del entorno desde el stack
-FASE 5 — PROGRAMACIÓN       /be /ui → backend y frontend en paralelo, ambos leyendo metadata
+FASE 1 — METADATA           /meta   → tablas, campos, procesos en BD
+FASE 2 — ARQUITECTURA       /arq    → derivar capas desde metadata
+FASE 3 — STACK              /dev    → componentes_sistema con versiones
+FASE 4 — INSTALACIÓN        /dev    → bootstrap desde stack
+FASE 5 — PROGRAMACIÓN       /be /ui → backend + frontend leyendo metadata
 ```
 
 ## Las 4 versiones (acumulativas)
 
-| Versión | Niveles incluidos | Capacidad |
-|---------|-------------------|-----------|
-| V1 | 1 + 2 | Estructural + operacional (mínimo viable) |
-| V2 | + 3 + 4 | + Capas administrativas + resiliencia |
-| V3 | + 5 + 6 + 7 | + Esquemas BD + cache + históricos |
+| Versión | Niveles | Capacidad |
+|---------|---------|-----------|
+| V1 | 1 + 2 | Estructural + operacional |
+| V2 | + 3 + 4 | + Autorización fina + resiliencia |
+| V3 | + 5 + 6 + 7 | + Multi-schema BD + cache + históricos |
 | V4 | + 8 + 9 | + CDN/edge + observabilidad avanzada |
 
-## Lo nuevo en v1.1.0 — convivencia multi-agente
+## Lo nuevo en v2.0.0
 
-Tras desarrollar SistemaINV con backend y frontend agents en paralelo
-(sesión v1.4.0 → v1.4.9) identifiqué 8 mejoras concretas que ahora viven en
-esta plantilla:
+Salto mayor sobre v1.1.0. Incorpora 30+ items revisados por el frontend agent
+tras correr SistemaINV en producción (v1.4.0 → v1.4.9).
 
-| Componente | Qué resuelve |
-|------------|-------------|
-| `docs/messages/` con frontmatter | Mensajes inter-agente estructurados (vs `docs/3X-...md` sueltos) |
-| `docs/PENDIENTES.md` SSOT | Trabajo pendiente en 1 archivo (vs 4 lugares) |
-| Branch namespace `feat/be-* feat/fe-*` | Dueño visible a primera vista |
-| Branch protection en `main` | Bloquea push directo, requires CI |
-| Backend DoD §5.1.2 | Checklist enforced para backend (paralelo al UI DoD) |
-| Tests order-independent §5.1.3 | Count-before/after en vez de `ts > snapshot` |
-| Pre-commit `orphan-migration-check` | Bloquea regresión silenciosa de mig untracked + service modificado |
-| CI con path-filter por job | Solo corre lo que cambió; docs no disparan CI |
-| `migrations-clean-apply` CI job | Valida fresh DB → migrate (evita "verde por casualidad") |
-| Skill `/be` + agent `be-reviewer` | Modo disciplinado backend (espejo de `/ui` + `ui-reviewer`) |
-| Agent `message-bus` | Destila mensajes abiertos a tabla priorizada al iniciar sesión |
-| `memory/` con 7 gotchas | μs vs ms, double-INSERT, session_replication_role, SET LOCAL, etc. |
+### Codegen FUNCIONAL desde metadata
 
-Ver detalle completo en `CLAUDE.md §18` (Convivencia multi-agente).
+Scripts ejecutables (no stubs):
 
-## Cómo usar este método en un proyecto nuevo
+- **`meta-derive-types`**: campos_sistema → TS interfaces (`_generated.ts`).
+- **`front-msw-from-meta`**: tablas CRUD → MSW v2 handlers con fixtures
+  determinísticos.
+- **`meta-derive-openapi`**: → OpenAPI 3.1 YAML completo.
+
+CI job `metadata-snapshot-sync` corre los 3 + `git diff --exit-code` y bloquea
+PRs con drift.
+
+### Convivencia multi-agente robusta
+
+- **Mensajes append-only** en `docs/messages/` — estado derivado, cero
+  merge conflicts.
+- **Pendientes split por scope** (`backend.md`/`frontend.md`/...).
+- **Identidad de agente** en commits via hook.
+- **Skills nuevas**: `/handoff`, `/status`, `/inbox`, `/health-method`,
+  `/diff-meta`, `/coverage`, `/seed-demo`.
+- **Sub-agente** `be-reviewer` (par de `ui-reviewer`) + `message-bus` v2
+  con `--strict`.
+
+### CI completo
+
+- **E2E matrix** chromium + firefox + mobile-chrome.
+- **a11y** obligatorio (axe en light + dark).
+- **`migrations-clean-apply`** + **`migrations-down-syntax`** (cada up tiene down).
+- **`metadata-snapshot-sync`** falla si frontend olvida regenerar.
+- **`npm audit`** weekly con auto-issue.
+- **Path-filter por job** + paths-ignore para docs.
+- **GH Actions @v6/v5/v7** (Node 24 nativo).
+
+### Backend DoD §F — contratos canónicos del API
+
+- **F.1 Matriz HTTP** 200/201/204/400/401/403/404/409/422/423/503.
+- **F.2 Problem+JSON** (title+detail no vacíos, type URI estable).
+- **F.3 Envelope** `{ data, next_cursor }` plano.
+- **F.4 Serialización**: TIMESTAMP → ISO string, BOOLEANO_01 → 0|1 number.
+- **F.5 Idempotencia** `{ data, sin_cambio: true }`.
+- **F.6 Versionado** `/vN`: aditivos NO bumpean, breaking sí (90 días paralelo).
+
+### Migraciones up/down
+
+`templates/migrate.js` soporta `up [N]`, `down N`, `status`. CI valida que
+cada .up tiene .down sintácticamente válido.
+
+### Decisiones políticas tomadas
+
+- **Rollback**: estándar de industria (up/down).
+- **API versioning**: aditivos NO bumpean.
+- **Secrets**: 3 modos (dotenv/aws-sm/vault).
+- **i18n**: corto v2.0 (es-MX + i18next), multi-stack v3+, non-Latín latente.
+
+### 16 memorias técnicas pre-cargadas
+
+**Backend gotchas:** pg-timestamp-precision, trigger-double-insert,
+session-replication-role, set-local-transaction.
+
+**Frontend gotchas:** tailwind-v4-silent-fail, tanstack-querykey-mismatch,
+safari-date-input, rhf-controller-vs-register, dark-mode-contrast,
+scrollable-region-focusable, mobile-drawer-vs-sidebar, msw-handler-drift,
+tanstack-query-cache-cross-resource.
+
+**Convenciones del proyecto:** branch-namespace, migrations-vs-service,
+protocolo-mensajes, pendientes-ssot.
+
+## Cómo usar en un proyecto nuevo
 
 ```bash
-# 1. Copiar la base
+# 1. Copiar el árbol completo
 cp -R DesarrolloSistemasMetodoCompleto/* nuevo-proyecto/
-cp -R DesarrolloSistemasMetodoCompleto/.claude nuevo-proyecto/
-cp -R DesarrolloSistemasMetodoCompleto/.husky nuevo-proyecto/
-cp -R DesarrolloSistemasMetodoCompleto/.github nuevo-proyecto/
+cp -R DesarrolloSistemasMetodoCompleto/.claude   nuevo-proyecto/
+cp -R DesarrolloSistemasMetodoCompleto/.github   nuevo-proyecto/
+cp -R DesarrolloSistemasMetodoCompleto/.husky    nuevo-proyecto/
 
-# 2. Iniciar Claude Code
 cd nuevo-proyecto/
+
+# 2. Bootstrap
+bash templates/bootstrap.sh
+
+# 3. En GitHub Settings → Branches:
+#    Require PR + Status checks (backend, frontend, e2e, migrations-clean-apply,
+#    migrations-down-syntax, metadata-snapshot-sync, a11y) + No force push
+
+# 4. Iniciar Claude Code y arrancar Fase 1
 claude
-
-# 3. Dentro de Claude — flujo de las 5 fases
-/init-proyecto       # bootstrap: 11 migraciones + estructura
-/meta                # Fase 1: diseña la metadata del dominio
-/meta-validate       # verifica cobertura 100%
-/arq-derive          # Fase 2: propone arquitectura
-/stack-pick          # Fase 3: elige stack
-/install-from-stack  # Fase 4: instala
-/back-scaffold-from-meta + /front-scaffold-from-meta  # Fase 5
-
-# 4. Setup en GitHub
-# Branch protection rules en `main` (Settings → Branches):
-#   ✓ Require PR
-#   ✓ Require status checks: backend, frontend, e2e, migrations-clean-apply
-#   ✓ No force push, no delete
+> /sis      # diagnóstico
+> /meta     # diseña metadata del dominio
+> /arq      # arquitectura
+> /stack-pick
+> /install-from-stack
+> /back-scaffold-from-meta + /front-scaffold-from-meta
 ```
 
-Detalle completo del método y manual de uso en
-[`CLAUDE.md`](./CLAUDE.md) §14-18.
+## Multi-agente — onboarding
 
-## Convivencia con múltiples agentes
-
-Cuando empiezas trabajo en una sesión:
+Cada agente al iniciar sesión:
 
 ```bash
-# 1. Sync con remoto
-git fetch origin main && git pull
+node .claude/apply-agent-identity.js <backend|frontend|infra>
 
-# 2. Leer mensajes abiertos del otro agente
-# Opción A — manual:
-ls docs/messages/open/
-# Opción B — usar sub-agente (recomendado):
-# Invocar message-bus desde Claude: "lee mis mensajes abiertos"
-
-# 3. Confirmar pendientes
-cat docs/PENDIENTES.md
-
-# 4. Activar el modo disciplinado según la tarea
-# /be   → backend
-# /ui   → frontend
-# /meta → metadata
-# /sis  → director del ciclo de vida
+claude
+> /status                  # vista única del proyecto
+> message-bus              # mensajes filtrados para mí
+> /be   (o /ui)            # modo disciplinado
+# ... trabajo ...
+> /handoff <otro-agente>   # deja contexto preciso al cerrar sesión
 ```
 
 ## Origen
 
-Método extraído del proyecto SistemaINV (sistema de inventarios) tras
-desarrollarlo a través de **17+ migraciones** que establecieron progresivamente
-la convención de metadata y las prácticas de convivencia multi-agente.
+Método extraído de SistemaINV (v1.4.0 → v1.4.9, mayo 2026) y refinado vía
+revisión crítica del frontend agent. Cada decisión del método tiene un bug
+real que la motivó.
 
 **Releases:**
-- v1.0.0 (mayo 2026) — Método V1 base, extraído de SistemaINV v1.4.0
-- v1.1.0 (mayo 2026) — **Convivencia multi-agente, Backend DoD, CI optimizado**
-  (extraído de la sesión v1.4.0 → v1.4.9 con frontend agent activo)
+- v1.0.0 — Método V1 base
+- v1.1.0 — Convivencia multi-agente (mutable state)
+- **v2.0.0** — Append-only + codegen funcional + multi-browser CI +
+  contratos canónicos del API + rollback up/down + secrets multi-modo +
+  i18n + 16 memorias pre-cargadas

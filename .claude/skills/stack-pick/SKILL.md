@@ -31,6 +31,10 @@ Preguntar:
   PostgreSQL 16 + React 19 + Vite 8)
 - [ ] **¿Hay infraestructura corporativa que reusar?** (Redis cluster,
   observability stack, etc.)
+- [ ] **Secrets management** — escoger UNO:
+  - `dotenv-server` (default dev + single-VPS on-prem)
+  - `aws-secrets-manager` (producción AWS managed)
+  - `hashicorp-vault` (multi-cloud / on-prem con renew dinámico)
 
 ## Pasos
 

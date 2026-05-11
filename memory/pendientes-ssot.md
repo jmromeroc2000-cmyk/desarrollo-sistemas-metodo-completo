@@ -1,43 +1,49 @@
 ---
-name: docs/PENDIENTES.md es la single source of truth de pendientes
-description: Único registro de trabajo pendiente. IDs <scope>-N estables. Cada commit que cierra un item agrega `Closes <id>` al footer.
+name: docs/pendientes/<scope>.md es la single source of truth de pendientes
+description: 4 archivos por scope (backend, frontend, infra, roadmap). IDs <scope>-N estables. Solo el agente owner edita su archivo (cero merge conflicts).
 type: reference
 ---
 
-`docs/PENDIENTES.md` es el **único** lugar donde se registra trabajo
-pendiente. Sustituye los `[TODO v1.X.X]` esparcidos en código, en mensajes
-y en roadmap.
+`docs/pendientes/<scope>.md` es el **único** lugar donde se registra
+trabajo pendiente. v2.0.0 reemplazó el archivo único v1.1.0 (que causaba
+merge conflicts en paralelo) por **4 archivos por scope**:
 
-**Estructura:**
-
-```markdown
-# Pendientes activos
-
-## Backend
-- [ ] **be-1**: descripción. Owner: backend. Prio: alta. ETA: v1.5.0.
-
-## Frontend
-- [ ] **fe-1**: descripción. Blocked-by: be-1.
-
-## Infra / DevOps
-- [ ] **infra-1**: descripción.
-
-# Pendientes diferidos
-- [ ] Item para roadmap futuro.
+```
+docs/pendientes/
+├── README.md         ← protocolo
+├── backend.md        ← solo backend agent edita
+├── frontend.md       ← solo frontend agent edita
+├── infra.md          ← infra/DevOps
+└── roadmap.md        ← items diferidos, cualquiera edita (baja frecuencia)
 ```
 
-**Reglas:**
+**IDs**: `<scope>-<n>` (`be-1`, `fe-1`, `infra-1`) secuencial por scope,
+**no reciclable**. Si se elimina antes de cerrar, el `<n>` queda quemado.
 
-- IDs `<scope>-N` (be-, fe-, infra-) — estables, no reciclar.
-- Item nuevo se agrega ANTES de empezar el trabajo.
-- Marcar `[x]` solo cuando hay PR mergeado con `Closes <id>` en commit.
-- Al cerrar, MOVER el item a `docs/CHANGELOG.md` con la versión.
-- Roadmap futuro: items diferidos conscientemente; no se borran.
+**Workflow**:
 
-**Beneficios:**
+- Item nuevo → agregar a `<scope>.md` "Activos" ANTES de empezar.
+- Cerrar → PR con `Closes <scope>-<n>` en commit footer; marcar `[x]` y
+  mover a "Cerrados" del mismo archivo.
+- Diferir → mover a `roadmap.md` con razón.
+- Al release → "Cerrados" se mueven a `CHANGELOG.md` bajo la versión.
 
-- Vista única del trabajo (vs 4 lugares: memoria, commits, mensajes, roadmap).
-- Refresca al iniciar sesión: 1 archivo en vez de grep en 10.
+**Beneficios vs v1.1.0:**
+
+- Cero merge conflicts (solo el owner toca su archivo).
+- IDs locales por scope (be-1, fe-1 coexisten).
+- Vista combinada via `/status` skill cuando el humano necesita panorama.
 - Auditable: cada `[x]` se respalda con commit/PR.
-- Coordinable: el otro agente ve el state de tu trabajo antes de empezar
-  el suyo.
+
+**Cómo iniciar trabajo:**
+
+```bash
+# Backend agent al inicio de sesión:
+cat docs/pendientes/backend.md | grep '\[ \]'
+# → ver mis items activos
+```
+
+**Vista combinada (read-only):**
+
+`/status` skill agrega los 4 archivos en una tabla con prioridad y owner,
+ideal para el humano que quiere "dónde está el proyecto" sin abrir 4 docs.
