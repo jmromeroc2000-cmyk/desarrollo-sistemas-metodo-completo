@@ -1,0 +1,29 @@
+{
+  "comment": [
+    "Identidad por agente — usado por hooks SessionStart para configurar git author.",
+    "Cada agente debe correr al inicio de su sesión:",
+    "    node .claude/apply-agent-identity.js <backend|frontend|infra>",
+    "Esto configura git config user.email para que `git log --author=backend-agent` funcione.",
+    "",
+    "El humano sigue siendo el author OFICIAL del commit (su email global de git);",
+    "la identidad del agente se inyecta vía 'Authored-Agent:' footer + nombre composite."
+  ],
+  "agents": {
+    "backend": {
+      "name": "Backend Agent",
+      "email": "backend-agent@local.sistemainv",
+      "trailer": "Authored-Agent: backend"
+    },
+    "frontend": {
+      "name": "Frontend Agent",
+      "email": "frontend-agent@local.sistemainv",
+      "trailer": "Authored-Agent: frontend"
+    },
+    "infra": {
+      "name": "Infra Agent",
+      "email": "infra-agent@local.sistemainv",
+      "trailer": "Authored-Agent: infra"
+    }
+  },
+  "commitMessageTemplate": "<type>(<scope>): <subject>\n\n<body>\n\n<trailer>\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
+}

@@ -1,18 +1,23 @@
 ---
-name: Protocolo de mensajes inter-agente
-description: docs/messages/open + archived es el único canal. Frontmatter YAML con from/to/state/closes. Ver docs/messages/README.md.
+name: Protocolo de mensajes inter-agente — append-only
+description: docs/messages/{open,archived}/ con frontmatter YAML. Mensajes son inmutables; estado del thread se deriva de in_reply_to y closes. Cero merge conflicts.
 type: reference
 ---
 
-Cuando dos o más agentes trabajan en el mismo repo (backend, frontend, infra),
-los mensajes entre ellos viven en `docs/messages/`:
+Cuando dos o más agentes trabajan en el mismo repo (backend, frontend,
+infra), los mensajes entre ellos viven en `docs/messages/`:
 
 ```
 docs/messages/
 ├── README.md          ← protocolo completo
 ├── open/              ← mensajes activos
-└── archived/          ← respondidos/cerrados
+└── archived/          ← threads cerrados
 ```
+
+**Principio fundamental (v2.0.0):** los mensajes son **append-only**. No
+se edita ningún archivo después de creado. El estado del thread se deriva
+del grafo de `in_reply_to`/`closes`. Esto elimina merge conflicts cuando
+dos agentes responden en paralelo.
 
 **Al ABRIR sesión** (cada agente):
 
@@ -20,28 +25,50 @@ docs/messages/
 ls docs/messages/open/  # listar mensajes activos
 ```
 
-O invocar el sub-agente `message-bus` que destila la lista a una tabla
-priorizada filtrada por `to: <mi-agente>`.
+O invocar `message-bus` que destila por agente, calcula estado y prioriza.
 
-**Al ENVIAR mensaje:** crear archivo en `open/` con nombre
-`YYYY-MM-DD-HHmm-from-X-to-Y-tema.md` y frontmatter:
+**Al ENVIAR mensaje nuevo:**
 
 ```yaml
 ---
 from: backend
-to: frontend
+to:   frontend
 created: 2026-05-11T00:00:00-06:00
 subject: <asunto>
-closes: []
-state: open
 labels: [migration]
 ---
 ```
 
-**Al RESPONDER:** crear nuevo archivo con `closes: [archivo-original.md]` y
-actualizar `state: responded` del archivo original.
+**Al RESPONDER:** crear NUEVO archivo con `in_reply_to:` apuntando al
+mensaje origen. NO editar el origen.
 
-**Al CERRAR:** mover todos los archivos del thread a `archived/` con
-`state: closed`. Pendientes generados deben estar en `docs/PENDIENTES.md`.
+```yaml
+---
+from: frontend
+to:   backend
+created: 2026-05-11T03:00:00-06:00
+subject: Re: <asunto>
+in_reply_to: 2026-05-11-from-backend-...md
+labels: [...]
+---
+```
 
-Detalles completos en `docs/messages/README.md` del proyecto.
+**Al CERRAR thread:** mensaje final con `closes: [archivo1, archivo2, ...]`.
+Después de commitear, mover TODOS los archivos del thread a `archived/`.
+
+**Estado derivado (calcula `message-bus`):**
+
+- sin respuesta → `open`
+- ≥1 respuesta sin `closes:` → `replied`
+- respuesta con `closes:` → `closed` → mover a `archived/`
+
+**Validación estructural:** `node scripts/message-bus-validate.js --strict`
+verifica:
+- frontmatter válido
+- `in_reply_to` apunta a archivo existente
+- `closes` apunta a archivos existentes
+- threads cerrados están en archived/
+
+CI corre con `--strict` y falla el job si hay anomalías.
+
+Detalles completos en `docs/messages/README.md`.
