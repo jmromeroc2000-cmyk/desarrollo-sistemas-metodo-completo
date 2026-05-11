@@ -66,6 +66,16 @@ export class Db2Adapter extends BaseAdapter {
       pwd:      config.password,
     });
   }
+
+  async beginMetadataChange(client) {
+    await client.query(`SET app_allow_metadata_change = 'true'`);
+  }
+
+  async endMetadataChange(client) {
+    try {
+      await client.query(`SET app_allow_metadata_change = 'false'`);
+    } catch { /* best-effort */ }
+  }
 }
 
 export default new Db2Adapter();

@@ -45,6 +45,12 @@ export class SpannerAdapter extends BaseAdapter {
     // en vez de client.query() típico de SQL clients.
     return database;
   }
+
+  // No-op: Spanner no tiene triggers, no necesita bypass.
+  // La protección de metadata en Spanner vive EXCLUSIVAMENTE en la Capa 1
+  // (middleware protectMetadata). Ver triggers.sql para detalles.
+  async beginMetadataChange(_client) { return; }
+  async endMetadataChange(_client)   { return; }
 }
 
 export default new SpannerAdapter();

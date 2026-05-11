@@ -66,6 +66,16 @@ export class MysqlAdapter extends BaseAdapter {
       timezone: 'Z',             // UTC siempre
     });
   }
+
+  async beginMetadataChange(client) {
+    await client.query(`SET @app_allow_metadata_change = 'true'`);
+  }
+
+  async endMetadataChange(client) {
+    try {
+      await client.query(`SET @app_allow_metadata_change = NULL`);
+    } catch { /* best-effort */ }
+  }
 }
 
 export default new MysqlAdapter();

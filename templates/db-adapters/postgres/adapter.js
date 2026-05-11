@@ -51,6 +51,16 @@ export class PostgresAdapter extends BaseAdapter {
       max:      config.max ?? 10,
     });
   }
+
+  async beginMetadataChange(client) {
+    await client.query(`SELECT set_config('app.allow_metadata_change', 'true', false)`);
+  }
+
+  async endMetadataChange(client) {
+    try {
+      await client.query(`SELECT set_config('app.allow_metadata_change', 'false', false)`);
+    } catch { /* best-effort */ }
+  }
 }
 
 export default new PostgresAdapter();

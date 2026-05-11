@@ -76,6 +76,22 @@ export class SqlServerAdapter extends BaseAdapter {
       pool: { max: config.max ?? 10 },
     });
   }
+
+  async beginMetadataChange(client) {
+    await client.request().query(
+      `EXEC sys.sp_set_session_context @key=N'allow_metadata_change',
+                                       @value=N'true', @read_only=0`,
+    );
+  }
+
+  async endMetadataChange(client) {
+    try {
+      await client.request().query(
+        `EXEC sys.sp_set_session_context @key=N'allow_metadata_change',
+                                         @value=N'false', @read_only=0`,
+      );
+    } catch { /* best-effort */ }
+  }
 }
 
 export default new SqlServerAdapter();

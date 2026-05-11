@@ -97,4 +97,22 @@ export class BaseAdapter {
   createPool(_config) {
     throw new Error('createPool() debe ser implementado por el adapter concreto');
   }
+
+  /**
+   * Activa el bypass de los triggers de protección de metadata en la sesión
+   * actual. Ejecutado por el migration runner ANTES de cada migración.
+   * Cada adapter override con su mecanismo (session var/context/variable).
+   * No-op en spanner (no hay triggers).
+   */
+  async beginMetadataChange(_client) {
+    throw new Error('beginMetadataChange() debe ser implementado por el adapter');
+  }
+
+  /**
+   * Limpia el bypass (opcional — la sesión también lo limpia al cerrar).
+   * Best-effort: si falla, no propagar.
+   */
+  async endMetadataChange(_client) {
+    throw new Error('endMetadataChange() debe ser implementado por el adapter');
+  }
 }

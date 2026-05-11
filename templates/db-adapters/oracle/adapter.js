@@ -75,6 +75,16 @@ export class OracleAdapter extends BaseAdapter {
       poolMax:       config.max ?? 10,
     });
   }
+
+  async beginMetadataChange(client) {
+    await client.execute(`BEGIN APP_CTX_PKG.set_allow_metadata_change('true'); END;`);
+  }
+
+  async endMetadataChange(client) {
+    try {
+      await client.execute(`BEGIN APP_CTX_PKG.set_allow_metadata_change('false'); END;`);
+    } catch { /* best-effort */ }
+  }
 }
 
 export default new OracleAdapter();

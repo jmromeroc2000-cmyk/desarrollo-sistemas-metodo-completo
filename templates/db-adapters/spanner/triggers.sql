@@ -1,0 +1,36 @@
+-- ============================================================
+-- Google Cloud Spanner — Triggers de protección de metadata
+-- ============================================================
+--
+-- ⚠️  Spanner NO soporta triggers de BD (BEFORE/AFTER INSERT/UPDATE/DELETE).
+-- Este archivo queda intencionalmente VACÍO.
+--
+-- Implicación arquitectónica:
+--
+--   Capa 1 (middleware protectMetadata): ÚNICA defensa de la metadata
+--   en sistemas que corren sobre Spanner. Cualquier SQL directo
+--   (DBAs, herramientas externas) puede modificar metadata sin
+--   bloqueo a nivel BD.
+--
+-- Mitigaciones operativas recomendadas para Spanner:
+--
+--   1) IAM/permisos: el rol de Cloud Spanner que usa el backend
+--      tiene permisos read+write a tablas de dominio pero SOLO read
+--      a `tablas_sistema`, `campos_sistema`, `metadata_versiones`,
+--      `procesos_sistema`, `semaforos_sistema`, `semaforos_gating`,
+--      `variables_sistema`, `componentes_sistema`. Crear un rol IAM
+--      específico para migraciones que SÍ tiene write a esas tablas.
+--
+--   2) Auditoría: habilitar Cloud Audit Logs en Spanner para detectar
+--      writes inesperados desde gcloud spanner databases execute-sql.
+--
+--   3) Política operativa: ningún acceso directo a Spanner con permisos
+--      de write fuera del migration runner.
+--
+-- El runner detecta `adapter.supportsTriggers === false` y se salta
+-- automáticamente la aplicación de triggers. Spanner queda con CAPA 1
+-- exclusivamente — documentado en templates/db-adapters/README.md.
+-- ============================================================
+
+-- (Sin contenido. Archivo presente para que applyTriggers() no falle al
+-- buscarlo. _executeMultiStatement() lo lee vacío y sale sin hacer nada.)
