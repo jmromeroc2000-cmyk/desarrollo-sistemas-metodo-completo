@@ -2170,6 +2170,51 @@ Sin estas reglas, dos agentes pueden pushear directo a main y romperse
 mutuamente (caso real: v1.4.8 → v1.4.9, un agente rompió main que el
 otro debía consumir).
 
+### 13.3b Secrets management (v2.0.0)
+
+> El método NO opta por uno. Ofrece 3 modos con criterios de selección.
+> `/stack-pick` pregunta cuál y siembra el componente correspondiente.
+
+```yaml
+MODOS DISPONIBLES:
+  dotenv-server:         Archivo .env en filesystem
+    componente:          componentes_sistema (codigo='secrets-dotenv', nivel=2)
+    archivo:             .env (en .gitignore) + .env.example (versionado)
+    permisos:            chmod 0600 propietario del proceso
+    rotación:            manual (cambiar .env + restart)
+    apropiado para:      dev local, sistemas on-prem single-VPS, prototipos
+    inapropiado para:    producción cloud, secrets compartidos entre servicios
+                         multi-instancia
+
+  aws-secrets-manager:   AWS Secrets Manager
+    componente:          codigo='secrets-aws-sm', nivel=2
+    autenticación:       IAM role del EC2/ECS/Lambda (no api keys)
+    rotación:            automática vía AWS SDK
+    apropiado para:      producción AWS, single-cloud
+    inapropiado para:    on-prem, multi-cloud sin AWS
+
+  hashicorp-vault:       HashiCorp Vault
+    componente:          codigo='secrets-vault', nivel=2
+    autenticación:       Kubernetes ServiceAccount / AppRole / cert
+    rotación:            dynamic secrets (BD credentials que vencen)
+    apropiado para:      multi-cloud, on-prem enterprise, secrets compartidos
+                         entre múltiples servicios con renew automático
+    inapropiado para:    sistemas pequeños (overhead de Vault server)
+
+PROHIBIDO en TODOS los modos:
+  ✗ Secrets en repo (git)
+  ✗ Secrets en variables de entorno de CI no encriptadas
+  ✗ Secrets en logs (logger debe redactar — ver templates/backend/logger.js
+    LOG_REDACT_FIELDS env var configura campos adicionales)
+  ✗ Secrets en imágenes Docker (usar Docker secrets o env vars dinámicas)
+
+CONVENCIÓN cross-modos:
+  - Las claves de secrets usan UPPER_SNAKE_CASE (DB_PASSWORD, JWT_PRIVATE_KEY)
+  - Cargados al inicio del proceso, no en cada request
+  - Validación de presencia en startup: si falta uno crítico, FAIL FAST,
+    no degradación silenciosa
+```
+
 ### 13.4 Roles del sistema (fijos)
 
 Cada proyecto debe sembrar EXACTAMENTE estos 5 roles con los UUIDs reservados:
