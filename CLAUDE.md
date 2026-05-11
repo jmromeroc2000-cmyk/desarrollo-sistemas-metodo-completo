@@ -2215,6 +2215,138 @@ CONVENCIÓN cross-modos:
     no degradación silenciosa
 ```
 
+### 13.3c Internacionalización (i18n) y multi-stack (v2.0.0)
+
+> Alcance corto (i18n del frontend actual) + visión declarada (multi-stack)
+> + capacidades preparadas para non-Latín scripts.
+
+#### Alcance corto — i18n del frontend (entra a v2.0.0)
+
+```yaml
+locale_base:    es-MX
+framework:      i18next con backend-loader
+encoding:       UTF-8 en TODOS los layers
+                - BD: ENCODING UTF8, COLLATE 'und-x-icu' (PostgreSQL)
+                - HTTP: Content-Type incluye charset=utf-8
+                - Source files: UTF-8 sin BOM
+
+estructura_locales:
+  Dev/frontend/src/locales/
+  ├── es-MX/
+  │   ├── common.json          # navegación, labels comunes
+  │   ├── domain.json          # generado desde campos_sistema.nombre_corto
+  │   └── messages.json        # mensajes derivados de campos_sistema.mensaje_ayuda
+  └── (en-US/, pt-BR/, ... si se activan)
+
+generación:
+  npm run i18n:extract         # script meta-derive-i18n.js corre desde metadata
+                               # Cuando se agregan locales nuevos, traducción
+                               # manual por traductor humano (NO agente).
+
+política:
+  - Toda label/tooltip user-facing usa i18next t() — no strings inline
+  - Plurales con i18next plural rules
+  - Fechas y números: Intl.DateTimeFormat + Intl.NumberFormat según locale
+  - Moneda: Intl.NumberFormat con currency derivado de MONEDA_OPERATIVA
+```
+
+#### Visión multi-stack (v3.0.0+ — declarada, no implementada todavía)
+
+Hoy el método asume Node + React + Postgres. Roadmap: stack-templates
+intercambiables.
+
+```
+.claude/skills/stack-templates/     ← v3.0.0+
+├── node-express-postgres/   ← actual, "default"
+├── python-fastapi-postgres/ ← futuro
+├── go-chi-postgres/         ← futuro
+└── rust-axum-postgres/      ← futuro
+
+Lo que SE MANTIENE cross-stack (contratos, no implementación):
+  - Convención de metadata (tablas_sistema, campos_sistema, ...)
+  - docs/messages/ + docs/pendientes/ append-only
+  - Migraciones con .up.sql/.down.sql
+  - Problem+JSON RFC 9457
+  - Paginación cursor-based con envelope { data, next_cursor }
+  - Matriz HTTP canónica
+  - Codegen de tipos desde metadata (TS default; otros: Python dataclasses,
+    Go structs, Rust types — skill análoga)
+
+Lo que CAMBIA por stack:
+  - Lenguaje + framework HTTP
+  - ORM o SQL raw
+  - Test runner, linter, formatter, build tool
+```
+
+#### Capacidades para non-Latín scripts (preparadas en v2, activadas según locale)
+
+UTF-8 cubre Latín, Cirílico, Árabe, CJK, Devanagari. Capacidades extra:
+
+```
+BD:
+  COLLATE 'und-x-icu' default v2.0.0     ← sort cultural correcto
+
+Frontend fuentes (tokens/typography.json):
+  Default: Inter (Latín, Cirílico, Griego)
+  Fallback: + Noto Sans CJK + Noto Sans Arabic + system-ui
+
+Frontend layout RTL (Árabe, Hebreo):
+  - @tailwindcss/typography + dir variants
+  - HTML lang + dir attrs según locale
+  - CI a11y matrix incluye dir="rtl" cuando hay locale RTL activo
+
+Validaciones:
+  - PROHIBIDO regex `^[a-zA-Z]+$` en nombres → usar `\p{L}+`
+  - Longitud por caracteres Unicode, no bytes (graphemes para names)
+  - Comparación con Intl.Collator, no ===
+
+Inputs:
+  - IME composition events soportados (CJK)
+  - Auto-capitalize off en idiomas sin mayúscula
+```
+
+ACTIVACIÓN: sistema declara `locale != es-MX` o `script != Latin` en
+`variables_sistema` → CI matrix incluye ese locale automáticamente.
+
+### 13.3d Convención `tabla_uso` en `tablas_sistema` (v2.0.0)
+
+Columna adicional en `tablas_sistema` (declarada en migración bootstrap):
+
+```sql
+ALTER TABLE tablas_sistema
+ADD COLUMN tabla_uso VARCHAR(20) NOT NULL DEFAULT 'crud',
+ADD CONSTRAINT ck_tablas_sistema_uso
+  CHECK (tabla_uso IN ('crud', 'lectura', 'interna', 'reporte'));
+```
+
+Valores:
+
+| `tabla_uso` | Significado | Frontend |
+|-------------|-------------|----------|
+| `crud` | CRUD completo en UI | `<Tabla>List/Form/Detail` generadas por `gen:catalog` |
+| `lectura` | Solo lectura en UI (no editable desde la app) | Lista + detalle, sin formularios |
+| `interna` | Sin UI (uso interno del sistema) | NO se genera UI |
+| `reporte` | Vista derivada para reportes | Visor especial, no formularios |
+
+Ejemplos:
+
+- `usuarios`: `crud` (admin gestiona).
+- `usuarios_roles`: `interna` (manejado vía `/v1/usuarios/:id/roles`, no directo).
+- `movimientos`: `lectura` (se crea por triggers automáticos al confirmar entrada/salida).
+- `audit_log`: `reporte` (vista de auditoría).
+- `_migrations`: `interna` (no se expone, lo maneja el runner).
+
+**Uso por las skills**:
+
+- `front-scaffold-from-meta` lee `tabla_uso`:
+  - `crud` → genera pages completas (lista + form + detalle).
+  - `lectura` → solo lista + detalle (no form).
+  - `interna` → no genera UI.
+  - `reporte` → genera visor read-only con filtros.
+
+- `gen:catalog` (Plop) solo lista tablas con `tabla_uso='crud'` y
+  `generar_ui_crud=1`.
+
 ### 13.4 Roles del sistema (fijos)
 
 Cada proyecto debe sembrar EXACTAMENTE estos 5 roles con los UUIDs reservados:
