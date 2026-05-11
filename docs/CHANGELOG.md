@@ -21,6 +21,95 @@ vía `release-please` (`.github/workflows/release-please.yml`).
 
 Scopes convencionales: `be`, `fe`, `infra`, `meta`, `deps`, `method`.
 
+## [3.0.0] — 2026-05-13 — Portabilidad multi-DBMS
+
+Salto MAJOR sobre v2.0.0. **Requisito firme del usuario:** el método y todos
+los sistemas que produce deben correr sobre los 6 DBMS enterprise sin cambios
+en código de aplicación: PostgreSQL, MySQL, SQL Server, Oracle, DB2 y Google
+Cloud Spanner.
+
+### Added
+
+- **db-adapter pattern** (`templates/db-adapters/{6 dirs}/`):
+  - Interface común con `genUuid`, `now`, `quote`, `upsertSql`,
+    `bypassTriggers`, `applyTriggers`, `beginMetadataChange`,
+    `endMetadataChange`, `createPool`.
+  - 6 implementaciones funcionales: postgres, mysql, sqlserver, oracle, db2, spanner.
+  - Selector runtime via `DB_DRIVER` env var.
+- **Capa 1 — `protectMetadata` middleware** (M1): bloquea writes HTTP a
+  tablas de metadata. Funciona en los 6 DBMS sin código específico.
+- **Capa 2 — triggers nativos opt-in por DBMS** (M3): 5 archivos
+  `triggers.sql` funcionalmente equivalentes (plpgsql/SQL-PSM/T-SQL/
+  PL-SQL/SQL-PL) + Spanner placeholder vacío.
+- **Migration runner multi-DBMS** (M4): `templates/migrate.js` con
+  `up [N]` / `down N` / `status` / `triggers`. SQL-92 estricto en
+  migraciones; runner abre transacciones via adapter.
+- **Plantillas SQL-92** (`templates/migrations/NNNN_NOMBRE.{up,down}.sql`)
+  + guía `PORTABLE-SQL.md` con tipos portables, patrones DDL/DML, y
+  alternativas a sintaxis NO portables (SERIAL, gen_random_uuid,
+  ON CONFLICT, JSONB, etc.).
+- **CI matrix** (M5):
+  - `.github/workflows/ci-matrix.yml` — postgres + mysql + sqlserver
+    (bloqueantes) + migration rehearsal (up→down→up) + Spanner emulator
+    (opt-in).
+  - `.github/workflows/ci-matrix-opt.yml` — oracle + db2 con
+    `workflow_dispatch` o label-driven (containers comerciales requieren
+    credenciales de registry).
+- **Tests portables** (M6):
+  - `templates/tests/helpers/db-test-helper.js` — `withTestClient`,
+    `runQuery`, `runQueryRows`, `runQueryScalar`, `countRows`,
+    `cleanTables`, `cleanProtectedTables`, `bypassTriggers`, `closePool`.
+  - `templates/tests/helpers/setup-test-db.js` — globalSetup para vitest.
+  - `templates/tests/integration/example-portable.test.js` — 5 patrones
+    canónicos demostrados.
+  - `templates/tests/README.md` — patrones canónicos + prohibidos.
+- **CLAUDE.md §13.2a** — matriz de soporte multi-DBMS con bypass
+  mechanism por DBMS y trade-offs documentados.
+
+### Changed
+
+- **CLAUDE.md §13.2** stack técnico: `db: PostgreSQL 16` reemplazado por
+  matriz multi-DBMS con default PG.
+- **Memoria `pg-timestamp-precision.md` → `timestamp-precision-cross-dbms.md`**:
+  generalizada a los 6 DBMS con tabla de precisión por motor.
+- **README.md**: nueva sección "Lo nuevo en v3.0.0" con arquitectura,
+  bloques M1-M7, breaking changes, CI matrix.
+
+### Removed
+
+- `SET LOCAL app.allow_metadata_change` en migraciones (PG-only): ahora
+  el bypass vive en `app.locals.allowMetadataChange` (app-layer).
+- `BEGIN; ... COMMIT;` explícitos en migraciones: el runner abre/cierra.
+- `gen_random_uuid()`, `clock_timestamp()`, `JSONB`, `CREATE EXTENSION`
+  de las migraciones bootstrap (no portables).
+- Triggers BD en `mig_005`/`mig_008`: se aplican post-bootstrap via
+  `node scripts/migrate.js triggers` desde `templates/db-adapters/<dbms>/triggers.sql`.
+
+### Breaking changes (v2.0.0 → v3.0.0)
+
+Proyectos existentes con v2.0.0 PG-only requieren migración:
+
+1. **Migraciones**: remover `BEGIN`/`COMMIT`/`SET LOCAL` explícitos.
+   Convertir `gen_random_uuid()` a UUIDs hardcoded. Convertir `JSONB` a
+   `VARCHAR(N)`. Eliminar `CREATE EXTENSION`. Mover triggers de mig 005/008
+   a `templates/db-adapters/postgres/triggers.sql`.
+2. **Service** `updateVariable`: ya no hace `set_config('app.audit_motivo')`;
+   ahora pasa motivo/ip_origen como columnas regulares del INSERT a
+   `variables_historia`. Ver `templates/backend/services/variables-sistema-service-example.js`.
+3. **Runner**: reemplazar `scripts/migrate.js` con la nueva versión que
+   usa db-adapter pattern.
+4. **Tests**: reemplazar `WHERE ts > snapshot` por count-before/after
+   via `countRows()` helper. Reemplazar imports directos de `pg` por
+   helpers de `db-test-helper.js`.
+5. **CI**: agregar `.github/workflows/ci-matrix.yml` con los 3 DBMS
+   obligatorios. Branch protection settings: incluir los nuevos status
+   checks (`backend-matrix (postgres)`, `(mysql)`, `(sqlserver)`,
+   `migration-rehearsal (...)`).
+
+Tiempo estimado de migración por proyecto existente: 1-2 días de
+backend con tests existentes que pasan en PG; más si se quiere validar
+en los 6 DBMS antes de declarar la migración completa.
+
 ## [2.0.0] — 2026-05-12 — Convivencia robusta + Codegen funcional
 
 Salto MAJOR sobre v1.1.0. Incorpora 30+ items de la revisión crítica del
